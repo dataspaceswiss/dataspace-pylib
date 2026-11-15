@@ -185,14 +185,17 @@ def test_an_input_that_was_never_built_needs_mock_data(workspace):
     assert workspace.data("copy")["id"].to_list() == [1, 2, 3]
 
 
-def test_an_input_of_another_workspace_is_mocked_by_its_rid(workspace):
+# The second names the transform by a constant called Previous, which is not the type of that name
+@pytest.mark.parametrize("constant, argument", [("RID", "'{rid}'"), ("Previous", "Previous")])
+def test_an_input_of_another_workspace_is_mocked_by_its_rid(workspace, constant, argument):
     rid = "rid.transform.11111111-2222-3333-4444-555555555555"
     workspace.add(
         "uses_other",
         "from __future__ import annotations\n"
         "import polars as pl\n"
         "from dataspace_pylib import Transform\n"
-        f"def transform(orders: Transform('{rid}')):\n"
+        f"{constant} = '{rid}'\n"
+        f"def transform(orders: Transform({argument.format(rid=rid)})):\n"
         "    return orders.select(total=pl.col('amount').sum())\n",
         inputs=(rid,),
     )

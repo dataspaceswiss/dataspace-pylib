@@ -678,15 +678,23 @@ def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform
     )
 
 
+def _names_previous(node: ast.AST) -> bool:
+    """Whether the name Previous stands anywhere but inside a call: Transform(Previous) names an input by a
+    constant of that name."""
+    if isinstance(node, ast.Call):
+        return False
+    if isinstance(node, ast.Name):
+        return node.id == "Previous"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "Previous"
+    return any(_names_previous(child) for child in ast.iter_child_nodes(node))
+
+
 def _is_previous(annotation: Any) -> bool:
     """Whether a parameter annotation asks for the previous build: Previous, or Previous in a union."""
     if isinstance(annotation, str):
         # from __future__ import annotations keeps the annotation as its source text
-        return any(
-            (isinstance(node, ast.Name) and node.id == "Previous")
-            or (isinstance(node, ast.Attribute) and node.attr == "Previous")
-            for node in ast.walk(ast.parse(annotation, mode="eval"))
-        )
+        return _names_previous(ast.parse(annotation, mode="eval"))
     return annotation is Previous or Previous in typing.get_args(annotation)
 
 
