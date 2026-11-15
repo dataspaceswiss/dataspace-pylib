@@ -351,14 +351,27 @@ def test_command_line(workspace):
         "TransformNotFoundError: There is no transform 'sauce'"
     )
 
-    (workspace.root / "build.json").write_text(json.dumps({"version": 2}))
+    # A description of a later version; whatever it holds must not show up in the build's log
+    (workspace.root / "build.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "output": {
+                    "uri": "s3://x",
+                    "credentials": {"accessKeyId": "SECRET-VALUE"},
+                },
+            }
+        )
+    )
     newer = subprocess.run(
         [sys.executable, "-m", "dataspace_pylib", "build", "build.json"],
         capture_output=True,
         check=False,
         text=True,
     )
+    assert newer.returncode == 1
+    assert "is not one this version of dataspace-pylib can read" in newer.stderr
     assert (
-        newer.returncode == 1
-        and "is not one this version of dataspace-pylib can read" in newer.stderr
+        "version: Input should be 1" in newer.stderr
+        and "SECRET-VALUE" not in newer.stderr
     )

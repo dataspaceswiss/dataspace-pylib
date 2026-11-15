@@ -38,10 +38,20 @@ def main() -> None:
             with open(arguments.description, encoding="utf-8") as f:
                 description = BuildDescription(**json.load(f))
         except (OSError, json.JSONDecodeError, ValidationError, TypeError) as e:
+            # The description holds credentials and this message ends up in the build's log, so a
+            # validation error names its fields without their values
+            problem = (
+                "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                    for error in e.errors(include_input=False, include_url=False)
+                )
+                if isinstance(e, ValidationError)
+                else str(e)
+            )
             raise ConfigurationError(
                 f"The build description {arguments.description} is not one this version of dataspace-pylib "
-                f"can read; the workspace may need another version of it. {e}"
-            ) from e
+                f"can read; the workspace may need another version of it. {problem}"
+            ) from None
         run_build(description)
     # The message says what is wrong; a traceback into this library would add nothing
     except (DataSpaceError, HealthCheckFailure) as e:
