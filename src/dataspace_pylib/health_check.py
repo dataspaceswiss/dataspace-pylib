@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
@@ -115,7 +115,7 @@ def run_health_checks(
     )
 
     report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "summary": {
             "total_columns": len(report_by_col),
             "total_checks": total_checks,

@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
+import tomllib
 import typing
 from collections.abc import Callable
 from datetime import datetime
@@ -126,7 +127,7 @@ _description: BuildDescription | None = None
 def _build() -> BuildDescription:
     if _description is None:
         raise DataSpaceError(
-            "No build is running. Run a transform with `python -m dataspace_pylib run <transform>`."
+            "No build is running. Run a transform with `uv run dataspace-pylib run <transform>`."
         )
     return _description
 
@@ -412,9 +413,10 @@ build = Build()
 
 
 class Config(BaseModel):
-    python: str
-    dfType: Literal["polars", "pandas"]
-    packages: list[str]
+    """The [tool.dataspace] table of the workspace's pyproject.toml."""
+
+    # The dataframe type transforms receive and return
+    dataframe: Literal["polars", "pandas"]
 
 
 class Connection(BaseModel):
@@ -423,29 +425,27 @@ class Connection(BaseModel):
     inputs: list[str]
 
 
-CONFIG_FILE = "_config.json"
+CONFIG_FILE = "pyproject.toml"
 CONNECTIONS_FILE = "_connections.json"
 
 
-def load_json(file_path: str) -> Any:
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError as e:
-        raise ConfigurationError(f"Configuration file not found: {file_path}") from e
-    except json.JSONDecodeError as e:
-        raise ConfigurationError(f"Invalid JSON in {file_path}: {e}") from e
-
-
 def load_configuration() -> tuple[Config, list[Connection]]:
-    """The workspace's _config.json and _connections.json, read from the current folder."""
+    """The workspace's pyproject.toml and _connections.json, read from the current folder."""
     try:
-        config = Config(**load_json(CONFIG_FILE))
-    except (ValidationError, TypeError) as e:
-        raise ConfigurationError(f"Invalid configuration in {CONFIG_FILE}: {e}") from e
+        with open(CONFIG_FILE, "rb") as f:
+            config = Config(**tomllib.load(f)["tool"]["dataspace"])
+    except FileNotFoundError as e:
+        raise ConfigurationError(f"Configuration file not found: {CONFIG_FILE}") from e
+    except (tomllib.TOMLDecodeError, KeyError, TypeError, ValidationError) as e:
+        raise ConfigurationError(
+            f'{CONFIG_FILE} needs a [tool.dataspace] table with dataframe = "polars" or "pandas": {e}'
+        ) from e
     try:
-        connections = [Connection(**item) for item in load_json(CONNECTIONS_FILE)]
-    except (ValidationError, TypeError) as e:
+        with open(CONNECTIONS_FILE, encoding="utf-8") as f:
+            connections = [Connection(**item) for item in json.load(f)]
+    except FileNotFoundError as e:
+        raise ConfigurationError(f"Configuration file not found: {CONNECTIONS_FILE}") from e
+    except (json.JSONDecodeError, ValidationError, TypeError) as e:
         raise ConfigurationError(f"Invalid configuration in {CONNECTIONS_FILE}: {e}") from e
     return config, connections
 
@@ -476,7 +476,7 @@ _df_type: str | None = None
 
 def _draft_read_limit() -> int | None:
     """How many rows a draft build reads of each dataset; None for all of them, as in every other build.
-    A workspace can change the number, or turn the limit off with -1 (_config.json draftReadLimit)."""
+    A workspace can change the number, or turn the limit off with -1 (draft-read-limit in pyproject.toml)."""
     build = _build()
     if not build.draft:
         return None
@@ -486,7 +486,7 @@ def _draft_read_limit() -> int | None:
     # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far
     if limit < 1:
         raise ConfigurationError(
-            f"draftReadLimit must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {limit}."
+            f"draft-read-limit must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {limit}."
         )
     return limit
 
@@ -766,7 +766,7 @@ def _run_transform() -> None:
     global _df_type
     build = _build()
     config, connections = load_configuration()
-    _df_type = config.dfType
+    _df_type = config.dataframe
 
     connection = next((c for c in connections if c.id == build.transformId), None)
     if connection is None:

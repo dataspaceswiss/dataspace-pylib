@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Dataframe transform runner for DataSpace"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     # Column lineage reads Polars' internal query plan, which Polars 2 changed (see _SUPPORTED_IR_MAJORS)
     "polars>=1.41.2,<2",
@@ -47,7 +47,7 @@ python_functions = ["test_*"]
 addopts = "--cov=dataspace_pylib --cov-report=term-missing --cov-report=html"
 
 [tool.black]
-target-version = ["py310"]
+target-version = ["py311"]
 
 [dependency-groups]
 dev = [

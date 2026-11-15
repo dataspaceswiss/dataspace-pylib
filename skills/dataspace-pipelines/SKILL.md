@@ -9,12 +9,12 @@ Develop DataSpace transforms while preserving pipeline wiring, lineage, persiste
 
 ## Compatibility
 
-This skill describes `dataspace-pylib` 0.7.0 as it is being developed (`0.7.0.dev0`, branch `feature/s3-storage`) running on DataSpace 1.15.0. A project declares its version as the `dataspace-pylib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
+This skill describes `dataspace-pylib` 0.7.0 as it is being developed (`0.7.0.dev0`, branch `feature/s3-storage`) running on DataSpace 1.15.0. A project declares its version as the `dataspace-pylib` entry in the `dependencies` of `pyproject.toml`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
 
 ## Workflow
 
 1. Inspect the repository before editing.
-   - Locate `_config.json`, `_connections.json`, transform source files, tests, and project-specific instructions.
+   - Locate `pyproject.toml`, `_connections.json`, transform source files, tests, and project-specific instructions.
    - Resolve the target transform RID and its upstream inputs from `_connections.json`.
    - Preserve unrelated changes in the working tree.
 2. Read [references/pipeline-runtime.md](references/pipeline-runtime.md) before changing transform code, paths, artifacts, health checks, incremental behavior, or local execution.
@@ -61,7 +61,7 @@ Git access goes over HTTPS with the user's DataSpace email and password and need
 - For health checks, return `(dataframe, checks)`, register checks with `Check` builders, and choose `severity="fail"` only when a failed check should fail the build.
 - For incremental transforms, add a parameter of the type `Previous`: return `history.append(new_rows)` to add rows without rewriting the old ones, or check `history.exists` and combine `history.data` with the new rows when old rows must change.
 - Read workspace secrets from environment variables named by their key in the workspace settings. Never hardcode a secret, print it, or write it to a dataset, artifact, or log.
-- A draft build runs uncommitted code on the first `draftReadLimit` rows of each input (`_config.json`, 1,000,000 by default, `-1` for all rows), and committed builds never read its output. Do not treat its row counts as final.
+- A draft build runs uncommitted code on the first `draft-read-limit` rows of each input (`[tool.dataspace]` in `pyproject.toml`, 1,000,000 by default, `-1` for all rows), and committed builds never read its output. Do not treat its row counts as final.
 - DataSpace supports bare transform parameters for transforms of the same workspace, and explicit `Transform("rid.transform...")` parameter annotations or `@transform(input=Transform("rid.transform..."))` decorator bindings for any input, which a transform of a linked foreign workspace needs. Read the connection-mapping section of [references/pipeline-runtime.md](references/pipeline-runtime.md) before declaring inputs from another workspace.
 - A bare name is suitable when name-based resolution is unambiguous in the workspace; otherwise use an explicit RID annotation or decorator binding. Workspace-qualified `Transform("WORKSPACE.transform")` references are planned but are not yet a supported replacement for the RID.
 - Consult the current [DataSpace documentation index](https://docs.dataspace.ch/llms.txt) when repository behavior and bundled guidance disagree; prefer current official documentation, then verify against the installed `dataspace-pylib` version.

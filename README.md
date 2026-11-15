@@ -17,8 +17,10 @@ def transform(orders: Input, history: Previous):
 Build a transform on your machine, in a clone of a workspace:
 
 ```bash
-python -m dataspace_pylib run <transform>
+uv run dataspace-pylib run <transform>
 ```
+
+uv reads the workspace's `pyproject.toml` and installs Python and the packages on the first run.
 
 Its data goes below `.dataspace/` in the repository; inputs are the latest local builds of the upstream transforms, or mock data.
 

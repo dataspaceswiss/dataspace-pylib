@@ -140,9 +140,7 @@ def build(s3, tmp_path, monkeypatch):
     inp = scoped_credentials(sts, [input_build], [])
     code = tmp_path / "code"
     code.mkdir()
-    (code / "_config.json").write_text(
-        json.dumps({"python": "3.11", "dfType": "polars", "packages": []})
-    )
+    (code / "pyproject.toml").write_text('[tool.dataspace]\ndataframe = "polars"\n')
     (code / "_connections.json").write_text(
         json.dumps(
             [
@@ -427,9 +425,7 @@ def test_draft_build_reads_the_first_rows(build, monkeypatch):
     client, code, _, output_build = build
     DESCRIPTION["draft"] = True
     DESCRIPTION["draftReadLimit"] = 2
-    (code / "_config.json").write_text(
-        json.dumps({"python": "3.11", "dfType": "pandas", "packages": []})
-    )
+    (code / "pyproject.toml").write_text('[tool.dataspace]\ndataframe = "pandas"\n')
     (code / "output.py").write_text("def transform(input):\n    return input\n")
 
     transform("rid.transform.output")
@@ -440,9 +436,7 @@ def test_draft_build_reads_the_first_rows(build, monkeypatch):
 
 def test_pandas_build_reads_and_writes_s3(build):
     client, code, _, output_build = build
-    (code / "_config.json").write_text(
-        json.dumps({"python": "3.11", "dfType": "pandas", "packages": []})
-    )
+    (code / "pyproject.toml").write_text('[tool.dataspace]\ndataframe = "pandas"\n')
     (code / "output.py").write_text(
         "def transform(input):\n    input['double'] = input['value'] * 2\n    return input\n"
     )

@@ -6,7 +6,7 @@ Place business logic in Python transform files, conventionally below `src/`. Def
 
 Start the file with a docstring that says what the transform produces and from what, and keep it current with the logic.
 
-The runner populates transform parameters with upstream data: a Polars `LazyFrame` per input when `_config.json` sets `"dfType": "polars"`, or an eager pandas `DataFrame` when it sets `"pandas"`. Return one of:
+The runner populates transform parameters with upstream data: a Polars `LazyFrame` per input when `pyproject.toml` sets `dataframe = "polars"`, or an eager pandas `DataFrame` when it sets `"pandas"`. Return one of:
 
 - `polars.LazyFrame` (preferred for optimization, streaming, and lineage)
 - `polars.DataFrame`
@@ -92,23 +92,26 @@ A formatter or lint configuration in the repository, the project's own conventio
 
 ## Project configuration
 
-`_config.json` at the repository root defines the build environment:
+`pyproject.toml` at the repository root defines the build environment. It is a normal Python project file, so the same file sets up the runner image on DataSpace and the environment of a local run:
 
-```json
-{
-  "confVersion": "1.0",
-  "python": "3.11",
-  "dfType": "polars",
-  "packages": [
+```toml
+[project]
+name = "workspace"
+version = "0"
+requires-python = "==3.11.*"
+dependencies = [
     "plotly",
-    "git+https://github.com/dataspaceswiss/dataspace-pylib@<commit of feature/s3-storage>#egg=dataspace-pylib"
-  ]
-}
+    "dataspace-pylib @ git+https://github.com/dataspaceswiss/dataspace-pylib@<commit of feature/s3-storage>",
+]
+
+[tool.dataspace]
+dataframe = "polars"
 ```
 
-- `python` and `packages` define the image every build of the workspace runs in. A change to them makes the next build create a new image first, which takes noticeably longer than a normal build. Keep `dataspace-pylib` in `packages`, pinned to a tag.
-- `dfType` decides the input type for every transform of the workspace. Keep `polars` unless the repository already uses `pandas`.
-- `draftReadLimit` is optional: the number of rows a draft build reads from each input (1,000,000 when unset), or `-1` to read every row. It needs `dataspace-pylib` 0.6.1 or later; 0.6.0 always reads 1,000,000.
+- `requires-python` and `dependencies` define the image every build of the workspace runs in; uv installs them. A change to the file makes the next build create a new image first, which takes noticeably longer than a normal build. Keep `dataspace-pylib` in `dependencies`, pinned to a tag; DataSpace refuses a file without it.
+- `uv.lock`, when it is committed, pins every package to the version uv resolved, and the image is built from exactly those. Without it, uv resolves the dependencies when the image is built. Commit it for reproducible builds, and commit it again after changing `dependencies` (`uv lock`).
+- `[tool.dataspace] dataframe` decides the input type for every transform of the workspace. Keep `polars` unless the repository already uses `pandas`.
+- `[tool.dataspace] draft-read-limit` is optional: the number of rows a draft build reads from each input (1,000,000 when unset), or `-1` to read every row.
 
 ## Connection mapping
 
@@ -177,7 +180,7 @@ Write the RID as a plain string literal directly inside the call, import `Transf
 
 Nothing re-derives the inputs when changes arrive over git. Whenever you add, remove, or rebind an input in code, make the same change to that transform's `inputs` in `_connections.json`, using the same RIDs.
 
-A workspace holds no entry point of its own: DataSpace runs a transform with `python -m dataspace_pylib build <description file>`, and a developer with `python -m dataspace_pylib run <transform>` (see Local execution).
+A workspace holds no entry point of its own: DataSpace runs a transform with `python -m dataspace_pylib build <description file>`, and a developer with `uv run dataspace-pylib run <transform>` (see Local execution).
 
 ## The running build
 
@@ -201,7 +204,7 @@ Workspace secrets are environment variables named by the secret's key in the wor
 
 ## Draft builds
 
-A build of code that is not committed yet is a draft. Each input is cut to its first `draftReadLimit` rows (1,000,000 unless `_config.json` sets another number; `-1` reads every row). Its output is read only by other draft builds, never by a committed build, and it is never the previous build of a later run. Use a draft to try a change, and a committed build for results that count.
+A build of code that is not committed yet is a draft. Each input is cut to its first `draft-read-limit` rows (1,000,000 unless `pyproject.toml` sets another number; `-1` reads every row). Its output is read only by other draft builds, never by a committed build, and it is never the previous build of a later run. Use a draft to try a change, and a committed build for results that count.
 
 ## Input metadata and upstream artifacts
 
@@ -298,10 +301,10 @@ A draft build's previous build is the last committed one, and its own output is 
 A clone of the workspace's repository builds on a developer's machine with the same library, from the repository root:
 
 ```bash
-python -m dataspace_pylib run <transform>
+uv run dataspace-pylib run <transform>
 ```
 
-`<transform>` is the transform's name (its file name without `.py`), its file, or its RID. The Python environment needs `dataspace-pylib` and the workspace's other packages from `_config.json`.
+`<transform>` is the transform's name (its file name without `.py`), its file, or its RID. [uv](https://docs.astral.sh/uv/) reads `pyproject.toml`, installs the Python version and the packages it asks for into `.venv/` on the first run, and runs the library in it; nothing has to be set up by hand. It also writes `uv.lock`, the exact versions it installed.
 
 A local build works like one on DataSpace, only the place differs: the folders are below `.dataspace/` in the repository instead of in S3. New workspaces ignore `.dataspace` in git; add it to the `.gitignore` of an older one before the first local run. The local store belongs to the clone, whatever branch is checked out.
 

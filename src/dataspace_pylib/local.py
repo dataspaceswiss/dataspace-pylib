@@ -1,4 +1,4 @@
-"""Builds on a developer's machine: `python -m dataspace_pylib run <transform>` in a clone of a workspace.
+"""Builds on a developer's machine: `uv run dataspace-pylib run <transform>` in a clone of a workspace.
 
 A local build works like one on DataSpace. Every run gets a build folder of its own, its inputs are the
 latest builds of the upstream transforms, and its previous build is its own last successful one. Only the
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +68,7 @@ def _dataset(rid: str, build_folder: Path) -> Dataset:
         "columnCount": len(data.schema.names),
         "sizeBytes": sum(file.stat().st_size for file in files),
         "createdAt": datetime.fromtimestamp(
-            build_folder.stat().st_mtime, timezone.utc
+            build_folder.stat().st_mtime, UTC
         ).isoformat(),
         "columns": {field.name: str(field.type) for field in data.schema},
     }

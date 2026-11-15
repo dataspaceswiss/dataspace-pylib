@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 
 from dataspace_pylib import (
+    ConfigurationError,
     DataLoadError,
     DataSpaceError,
     HealthCheckFailure,
@@ -19,13 +20,14 @@ from dataspace_pylib.local import run_local
 
 
 class Workspace:
-    """A clone of a workspace: _config.json, _connections.json and one file per transform."""
+    """A clone of a workspace: pyproject.toml, _connections.json and one file per transform."""
 
     def __init__(self, root: Path, df_type: str = "polars"):
         self.root = root
         self.connections: list[dict] = []
-        (root / "_config.json").write_text(
-            json.dumps({"python": "3.11", "dfType": df_type, "packages": []})
+        (root / "pyproject.toml").write_text(
+            '[project]\nname = "workspace"\nversion = "0"\nrequires-python = ">=3.11"\ndependencies = []\n\n'
+            f'[tool.dataspace]\ndataframe = "{df_type}"\n'
         )
         self._save()
 
@@ -376,6 +378,23 @@ def test_a_transform_can_define_dataclasses_and_be_named_like_a_module(workspace
     run_local("json")
 
     assert workspace.data("json")["id"].to_list() == [1]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[project]\nname = "w"\n',
+        '[tool.dataspace]\ndataframe = "spark"\n',
+        "not toml [",
+    ],
+    ids=["no table", "unknown dataframe type", "not TOML"],
+)
+def test_a_workspace_needs_its_dataspace_table(workspace, content):
+    workspace.add("source", SOURCE)
+    (workspace.root / "pyproject.toml").write_text(content)
+
+    with pytest.raises(ConfigurationError, match=r"needs a \[tool.dataspace\] table"):
+        run_local("source")
 
 
 def test_a_transform_that_does_not_exist_lists_the_ones_that_do(workspace):

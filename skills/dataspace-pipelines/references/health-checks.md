@@ -87,7 +87,7 @@ Test the transform result and the checks together:
 3. Exercise every fail-severity invariant and confirm `HealthCheckFailure` occurs only after the report is written.
 4. Cover empty input, all-null input, wrong data types, missing columns, boundary values, duplicates, and unexpected values where applicable.
 5. Confirm custom checks collect only bounded aggregate results rather than the full dataset.
-6. Run the target transform locally (`python -m dataspace_pylib run <transform>`) and inspect `meta/health_report.json` in its build folder below `.dataspace/`.
+6. Run the target transform locally (`uv run dataspace-pylib run <transform>`) and inspect `meta/health_report.json` in its build folder below `.dataspace/`.
 
 ## Official documentation
 
