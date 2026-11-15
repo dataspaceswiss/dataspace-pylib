@@ -1,30 +1,36 @@
-# Pyrunner for DataSpace
+# dataspace-pylib
 
-
-### Python Usage
+The Python side of [DataSpace](https://dataspace.ch): it runs a workspace's transforms and is the API they import.
 
 ```python
-from pyrunner_lib import transform
+import polars as pl
+from dataspace_pylib import Check, Input, Previous, build
 
-# Run a transformation
-transform("my_transform_id", "/path/to/base")
+
+def transform(orders: Input, history: Previous):
+    notes = orders.artifacts.get("notes.txt").read_text()   # upstream artifacts, fetched when asked for
+    (build.artifacts / "report.html").write_text("…")       # this build's artifacts
+    new_rows = orders.filter(pl.col("amount") > 0)
+    return history.append(new_rows), [Check("amount").no_nulls()]
 ```
 
-### CLI Usage
+Build a transform on your machine, in a clone of a workspace:
 
 ```bash
-python __main__.py <transform_id> <base_path>
+python -m dataspace_pylib run <transform>
 ```
+
+Its data goes below `.dataspace/` in the repository; inputs are the latest local builds of the upstream transforms, or mock data.
 
 ## DataSpace Pipelines Skill
 
-This repository includes the [`dataspace-pipelines`](https://github.com/dataspaceswiss/pyrunner-lib/tree/main/skills/dataspace-pipelines) skill for Codex and Claude Code.
+This repository includes the [`dataspace-pipelines`](https://github.com/dataspaceswiss/dataspace-pylib/tree/main/skills/dataspace-pipelines) skill for Codex and Claude Code. It describes the whole API.
 
 ### Codex
 
 ```text
 $skill-installer Install dataspace-pipelines from
-https://github.com/dataspaceswiss/pyrunner-lib/tree/main/skills/dataspace-pipelines
+https://github.com/dataspaceswiss/dataspace-pylib/tree/main/skills/dataspace-pipelines
 ```
 
 Invoke it with `$dataspace-pipelines`.
@@ -32,7 +38,7 @@ Invoke it with `$dataspace-pipelines`.
 ### Claude Code
 
 ```bash
-npx skills add https://github.com/dataspaceswiss/pyrunner-lib/tree/main/skills/dataspace-pipelines \
+npx skills add https://github.com/dataspaceswiss/dataspace-pylib/tree/main/skills/dataspace-pipelines \
   --agent claude-code --global
 ```
 

@@ -34,13 +34,14 @@ class HealthCheckFailure(Exception):
 def run_health_checks(
     dataset_path: str,
     column_builders: Iterable[Check],
+    meta_folder: str,
     storage_options: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Run health checks on the written output at dataset_path; storage_options are
     needed when it is an s3:// path.
 
-    Writes meta/health_report.json, then raises HealthCheckFailure if a
+    Writes health_report.json into meta_folder, then raises HealthCheckFailure if a
     fail-severity check failed.
     """
     lf = pl.scan_parquet(dataset_path, storage_options=storage_options)
@@ -127,9 +128,8 @@ def run_health_checks(
         "columns": report_by_col,
     }
 
-    output_dir = os.environ["META_FOLDER"]
-    os.makedirs(output_dir, exist_ok=True)
-    json_path = os.path.join(output_dir, "health_report.json")
+    os.makedirs(meta_folder, exist_ok=True)
+    json_path = os.path.join(meta_folder, "health_report.json")
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

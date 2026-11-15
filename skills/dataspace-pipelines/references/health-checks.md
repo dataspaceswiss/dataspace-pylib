@@ -2,10 +2,10 @@
 
 ## Runtime contract
 
-Define declarative column checks with `pyrunner_lib.health_check.Check` and return them with the transform result:
+Define declarative column checks with `dataspace_pylib.health_check.Check` and return them with the transform result:
 
 ```python
-import pyrunner_lib.health_check as hc
+import dataspace_pylib.health_check as hc
 
 
 def transform(input_df):
@@ -32,7 +32,7 @@ Checks may be chained on one `Check` builder or split across multiple builders f
 
 Choose severity from the data contract. Use `fail` for invariants required by downstream consumers and `warn` for monitoring thresholds that should remain visible without stopping delivery.
 
-The runner writes the report before raising for fail-severity results, so inspect `META_FOLDER/health_report.json` when diagnosing a failed build.
+The runner writes the report before raising for fail-severity results, so inspect the build's `meta/health_report.json` when diagnosing a failed build.
 
 ## Supported checks
 
@@ -67,7 +67,7 @@ Pass `violations` when the check is row-level, so DataSpace can show the rows th
 
 ## Health report
 
-The runner writes `META_FOLDER/health_report.json` with:
+The runner writes `meta/health_report.json` into the build folder with:
 
 - A UTC timestamp.
 - Summary counts for columns, checks, passed checks, failed checks, and the overall pass percentage.
@@ -76,7 +76,7 @@ The runner writes `META_FOLDER/health_report.json` with:
 
 For a failed row-level check, `rows` lists the positions of the first 1000 violating rows in the written dataset file. It holds row numbers only, never row values. `distinct_count`, `numeric_check(sum_eq=...)` on its own, and custom checks without `violations` judge the whole column and list no rows.
 
-Treat the JSON report as a build artifact for diagnostics and monitoring. Do not change its schema in a pipeline project; that schema belongs to `pyrunner-lib`.
+Treat the JSON report as a build artifact for diagnostics and monitoring. Do not change its schema in a pipeline project; that schema belongs to `dataspace-pylib`.
 
 ## Validation
 
@@ -87,7 +87,7 @@ Test the transform result and the checks together:
 3. Exercise every fail-severity invariant and confirm `HealthCheckFailure` occurs only after the report is written.
 4. Cover empty input, all-null input, wrong data types, missing columns, boundary values, duplicates, and unexpected values where applicable.
 5. Confirm custom checks collect only bounded aggregate results rather than the full dataset.
-6. Run the target transform by RID with `META_FOLDER` set, and inspect `META_FOLDER/health_report.json` in the generated build tree.
+6. Run the target transform locally (`python -m dataspace_pylib run <transform>`) and inspect `meta/health_report.json` in its build folder below `.dataspace/`.
 
 ## Official documentation
 

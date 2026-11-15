@@ -1,6 +1,5 @@
 """Tests for input_source_tracer module."""
 
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -8,13 +7,12 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from pyrunner_lib.input_source_tracer import (
+from dataspace_pylib.input_source_tracer import (
     InputSourceTracer,
     _ColumnLineage,
     _PlanState,
     trace_lazyframe_sources,
 )
-from pyrunner_lib.pyrunner_lib import write_column_trace_file
 
 
 class TestInputSourceTracer:
@@ -1289,17 +1287,6 @@ def test_tracing_after_schema_collection(sources):
     result = _trace(sources["left"].select("id", "value"), schema_first=True)
     assert set(result) == {"id", "value"}
 
-
-def test_runner_writes_real_final_lineage_file(tmp_path: Path):
-    source_path, rid = _write_source(
-        tmp_path, "rid.transform.integration", {"name": ["wrong"], "value": [1]}
-    )
-    output = pl.scan_parquet(source_path).select(pl.col("value").alias("name"))
-
-    write_column_trace_file(output, "rid.transform.output", str(tmp_path))
-
-    trace_path = tmp_path / "data" / "rid.transform.output" / "meta" / "columns.json"
-    assert json.loads(trace_path.read_text()) == {"name": [_source(rid, "value")]}
 
 
 def test_live_tracer_does_not_serialize_the_lazyframe(sources, monkeypatch):

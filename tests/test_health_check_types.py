@@ -6,7 +6,13 @@ import tempfile
 import pandas as pd
 import polars as pl
 
-from pyrunner_lib.health_check import Check, run_health_checks
+from dataspace_pylib import health_check
+from dataspace_pylib.health_check import Check
+
+
+def run_health_checks(dataset_path, checks):
+    """The tests name the report's folder in META_FOLDER; the runner passes its own."""
+    return health_check.run_health_checks(dataset_path, checks, os.environ["META_FOLDER"])
 
 
 def written(frame, directory):

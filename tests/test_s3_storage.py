@@ -15,15 +15,36 @@ import polars as pl
 import pyarrow.fs as pafs
 import pytest
 
-from pyrunner_lib import (
+from dataspace_pylib import (
     DataLoadError,
+    DataSpaceError,
     DataWriteError,
     Previous,
-    PyrunnerError,
-    transform,
+    runner,
 )
-from pyrunner_lib import build as running_build
-from pyrunner_lib.pyrunner_lib import Artifacts
+from dataspace_pylib import build as running_build
+from dataspace_pylib.runner import Artifacts, BuildDescription, run_build
+
+# The description of the build the tests run, as DataSpace writes it; a test changes it before it runs the build
+DESCRIPTION: dict = {}
+
+
+def transform(_transform_id):
+    run_build(BuildDescription(**DESCRIPTION))
+
+
+def meta(transform_id, rows):
+    return {
+        "transformId": transform_id,
+        "buildId": "rid.build.x",
+        "snapshotId": "rid.dataSnapshot.x",
+        "rowCount": rows,
+        "columnCount": 2,
+        "sizeBytes": 100,
+        "createdAt": "2026-11-15T12:00:00.000000+00:00",
+        "columns": {"id": "Int64", "value": "Int64"},
+    }
+
 
 ENDPOINT = os.environ.get("DS_TEST_S3_ENDPOINT")
 pytestmark = pytest.mark.skipif(not ENDPOINT, reason="DS_TEST_S3_ENDPOINT is not set")
@@ -135,38 +156,47 @@ def build(s3, tmp_path, monkeypatch):
         )
     )
     monkeypatch.chdir(code)
-    env = {
-        "TRANSFORM_ID": "rid.transform.output",
-        "DS_BUILD_URI": f"s3://{BUCKET}/{output_build}".rstrip("/"),
-        "DS_INPUTS": json.dumps(
-            {
+
+    def credentials(issued):
+        return {
+            "accessKeyId": issued["AccessKeyId"],
+            "secretAccessKey": issued["SecretAccessKey"],
+            "sessionToken": issued["SessionToken"],
+        }
+
+    DESCRIPTION.clear()
+    DESCRIPTION.update(
+        {
+            "version": 1,
+            "id": output_build.split("/")[1],
+            "transformId": "rid.transform.output",
+            "branch": "main",
+            "draft": False,
+            "local": False,
+            "storage": {"endpoint": ENDPOINT, "region": REGION},
+            "output": {
+                "uri": f"s3://{BUCKET}/{output_build}".rstrip("/"),
+                "credentials": credentials(own),
+            },
+            "inputs": {
                 "rid.transform.input": {
                     "uri": f"s3://{BUCKET}/{input_build}".rstrip("/"),
-                    "accessKeyId": inp["AccessKeyId"],
-                    "secretAccessKey": inp["SecretAccessKey"],
-                    "sessionToken": inp["SessionToken"],
+                    "credentials": credentials(inp),
+                    "meta": meta("rid.transform.input", 3),
                 }
-            }
-        ),
-        "DS_BUILD_ID": output_build.split("/")[1],
-        "DS_BRANCH": "main",
-        "DS_PREVIOUS": json.dumps(
-            {
+            },
+            # The build's own credentials read its previous build
+            "previous": {
                 "uri": f"s3://{BUCKET}/{previous_build}".rstrip("/"),
-                "meta": {"RowCount": 1},
-            }
-        ),
-        "ARTIFACT_FOLDER": str(tmp_path / "out" / "artifacts"),
-        "META_FOLDER": str(tmp_path / "out" / "meta"),
-        "DS_S3_ENDPOINT": ENDPOINT,
-        "DS_S3_REGION": REGION,
-        "DS_S3_ACCESS_KEY_ID": own["AccessKeyId"],
-        "DS_S3_SECRET_ACCESS_KEY": own["SecretAccessKey"],
-        "DS_S3_SESSION_TOKEN": own["SessionToken"],
-    }
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    os.makedirs(env["ARTIFACT_FOLDER"])
+                "credentials": credentials(own),
+                "meta": meta("rid.transform.output", 1),
+            },
+            "artifactFolder": str(tmp_path / "out" / "artifacts"),
+            "metaFolder": str(tmp_path / "out" / "meta"),
+        }
+    )
+    # For the tests that use the API without running a transform
+    monkeypatch.setattr(runner, "_description", BuildDescription(**DESCRIPTION))
     return client, code, input_build, output_build
 
 
@@ -196,9 +226,10 @@ def keys(client, prefix):
 def test_polars_build_reads_input_and_writes_dataset_artifacts_and_lineage(build):
     client, code, _, output_build = build
     (code / "output.py").write_text(
-        "import os, polars as pl\n"
+        "import polars as pl\n"
+        "from dataspace_pylib import build\n"
         "def transform(input):\n"
-        "    open(os.path.join(os.environ['ARTIFACT_FOLDER'], 'index.html'), 'w').write('<html><head></head></html>')\n"
+        "    (build.artifacts / 'index.html').write_text('<html><head></head></html>')\n"
         "    return input.with_columns(double=pl.col('value') * 2)\n"
     )
 
@@ -225,9 +256,9 @@ def test_incremental_build_reads_the_previous_dataset(build):
     client, code, _, output_build = build
     (code / "output.py").write_text(
         "import polars as pl\n"
-        "from pyrunner_lib import Previous\n"
+        "from dataspace_pylib import Previous\n"
         "def transform(input, history: Previous):\n"
-        "    assert history.exists and history.ds_meta.row_count == 1\n"
+        "    assert history.exists and history.meta.row_count == 1\n"
         "    return pl.concat([history.data, input])\n"
     )
 
@@ -247,7 +278,7 @@ def test_incremental_build_reads_the_previous_dataset(build):
 
 
 APPEND = (
-    "from pyrunner_lib import Previous\n"
+    "from dataspace_pylib import Previous\n"
     "def transform(input, history: Previous):\n"
     "    return history.append(input)\n"
 )
@@ -255,9 +286,7 @@ APPEND = (
 
 def test_append_keeps_the_previous_files_and_adds_the_new_rows(build):
     client, code, _, output_build = build
-    previous = json.loads(os.environ["DS_PREVIOUS"])["uri"].removeprefix(
-        f"s3://{BUCKET}/"
-    )
+    previous = DESCRIPTION["previous"]["uri"].removeprefix(f"s3://{BUCKET}/")
     (code / "output.py").write_text(APPEND)
 
     transform("rid.transform.output")
@@ -314,9 +343,7 @@ def test_previous_is_found_when_annotations_are_kept_as_text(build):
 
 def test_each_append_gets_the_next_folder(build):
     client, code, _, output_build = build
-    previous = json.loads(os.environ["DS_PREVIOUS"])["uri"].removeprefix(
-        f"s3://{BUCKET}/"
-    )
+    previous = DESCRIPTION["previous"]["uri"].removeprefix(f"s3://{BUCKET}/")
     buffer = io.BytesIO()
     pl.DataFrame({"id": [-1], "value": [-1]}).write_parquet(buffer)
     client.put_object(
@@ -337,9 +364,9 @@ def test_each_append_gets_the_next_folder(build):
 
 def test_append_on_the_first_build_writes_the_rows(build, monkeypatch):
     client, code, _, output_build = build
-    monkeypatch.delenv("DS_PREVIOUS")
+    DESCRIPTION["previous"] = None
     (code / "output.py").write_text(
-        "from pyrunner_lib import Previous\n"
+        "from dataspace_pylib import Previous\n"
         "def transform(input, history: Previous):\n"
         "    assert not history.exists\n"
         "    return history.append(input)\n"
@@ -355,7 +382,7 @@ def test_append_of_other_columns_fails(build):
     client, code, _, output_build = build
     (code / "output.py").write_text(
         "import polars as pl\n"
-        "from pyrunner_lib import Previous\n"
+        "from dataspace_pylib import Previous\n"
         "def transform(input, history: Previous):\n"
         "    return history.append(input.with_columns(extra=pl.lit(1)))\n"
     )
@@ -369,18 +396,19 @@ def test_append_of_other_columns_fails(build):
 
 
 def test_previous_build_that_does_not_exist_cannot_be_read(build, monkeypatch):
-    monkeypatch.delenv("DS_PREVIOUS")
-    history = Previous("rid.transform.output")
+    DESCRIPTION["previous"] = None
+    monkeypatch.setattr(runner, "_description", BuildDescription(**DESCRIPTION))
+    history = Previous()
 
     assert not history.exists
-    with pytest.raises(PyrunnerError, match="no previous build"):
+    with pytest.raises(DataSpaceError, match="no previous build"):
         _ = history.data
 
 
 def test_health_checks_read_the_written_dataset_and_upload_the_report(build):
     client, code, _, output_build = build
     (code / "output.py").write_text(
-        "from pyrunner_lib.health_check import Check\n"
+        "from dataspace_pylib import Check\n"
         "def transform(input):\n"
         "    return input, [Check('value').valid_range(min_val=15, severity='warn')]\n"
     )
@@ -397,8 +425,8 @@ def test_health_checks_read_the_written_dataset_and_upload_the_report(build):
 
 def test_draft_build_reads_the_first_rows(build, monkeypatch):
     client, code, _, output_build = build
-    monkeypatch.setenv("IS_DRAFT_BUILD", "true")
-    monkeypatch.setenv("DRAFT_READ_LIMIT", "2")
+    DESCRIPTION["draft"] = True
+    DESCRIPTION["draftReadLimit"] = 2
     (code / "_config.json").write_text(
         json.dumps({"python": "3.11", "dfType": "pandas", "packages": []})
     )
@@ -428,9 +456,9 @@ def test_pandas_build_reads_and_writes_s3(build):
 def test_failed_build_still_uploads_artifacts(build):
     client, code, _, output_build = build
     (code / "output.py").write_text(
-        "import os\n"
+        "from dataspace_pylib import build\n"
         "def transform(input):\n"
-        "    open(os.path.join(os.environ['ARTIFACT_FOLDER'], 'debug.txt'), 'w').write('state')\n"
+        "    (build.artifacts / 'debug.txt').write_text('state')\n"
         "    raise ValueError('boom')\n"
     )
 
@@ -459,10 +487,10 @@ def test_build_cannot_write_to_its_input(build):
 
 def test_input_that_was_not_granted_is_not_readable(build, monkeypatch):
     _, code, _, _ = build
-    monkeypatch.setenv("DS_INPUTS", "{}")
+    DESCRIPTION["inputs"] = {}
     (code / "output.py").write_text("def transform(input):\n    return input\n")
 
-    with pytest.raises(DataLoadError, match="No access"):
+    with pytest.raises(DataLoadError, match="was not given the data"):
         transform("rid.transform.output")
 
 
@@ -482,12 +510,10 @@ def test_build_reads_a_csv_from_the_artifacts_of_its_input(build):
     )
 
     # In a process of its own: a hanging build could not be stopped inside this one
+    description = code / "build.json"
+    description.write_text(json.dumps(DESCRIPTION))
     subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from pyrunner_lib import transform; transform('rid.transform.output')",
-        ],
+        [sys.executable, "-m", "dataspace_pylib", "build", str(description)],
         check=True,
         timeout=60,
     )
@@ -509,7 +535,7 @@ def test_artifacts_of_an_input_are_listed_and_fetched(build):
     )
     (code / "output.py").write_text(
         "import os\n"
-        "from pyrunner_lib import build\n"
+        "from dataspace_pylib import build\n"
         "def transform(input):\n"
         "    artifacts = input.artifacts\n"
         "    assert artifacts.list() == ['raw/batch.csv', 'raw/notes.txt', 'reference.bin']\n"
@@ -521,7 +547,8 @@ def test_artifacts_of_an_input_are_listed_and_fetched(build):
         "    assert sorted(str(p.relative_to(folder)) for p in folder.rglob('*') if p.is_file()) == "
         "['raw/batch.csv', 'raw/notes.txt', 'reference.bin']\n"
         "    (build.artifacts / 'copy.txt').write_text(artifacts.get('raw/notes.txt').read_text())\n"
-        "    assert build.id == os.environ['DS_BUILD_ID'] and build.branch == 'main' and not build.is_draft\n"
+        "    assert build.id.startswith('rid.build.') and build.branch == 'main'\n"
+        "    assert not build.is_draft and not build.is_local\n"
         "    return input\n"
     )
 
@@ -544,13 +571,11 @@ def test_artifacts_that_do_not_exist(build):
 
 def test_artifacts_of_the_previous_build_are_fetched(build):
     client, _, _, _ = build
-    previous = json.loads(os.environ["DS_PREVIOUS"])["uri"].removeprefix(
-        f"s3://{BUCKET}/"
-    )
+    previous = DESCRIPTION["previous"]["uri"].removeprefix(f"s3://{BUCKET}/")
     client.put_object(Bucket=BUCKET, Key=f"{previous}/artifacts/state.json", Body=b"{}")
 
     # A folder with files only: nothing but the folder itself has to be created
-    folder = Previous("rid.transform.output").artifacts.get()
+    folder = Previous().artifacts.get()
 
     assert os.listdir(folder) == ["state.json"]
 
@@ -562,7 +587,7 @@ def test_artifacts_of_a_build_that_was_not_granted_cannot_be_fetched(build):
         Bucket=BUCKET, Key=f"{foreign}artifacts/secret.txt", Body=b"secret"
     )
 
-    with pytest.raises(OSError):
+    with pytest.raises(DataLoadError, match="no access"):
         Artifacts(f"s3://{BUCKET}/{foreign}artifacts").get()
 
 

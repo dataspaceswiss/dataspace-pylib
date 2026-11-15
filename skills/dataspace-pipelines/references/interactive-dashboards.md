@@ -2,7 +2,7 @@
 
 ## Capability
 
-A DataSpace transform does not have to use its build step only for dataframe transformation. It can also build or transpile a browser application and emit the production bundle into `ARTIFACT_FOLDER`. When the bundle contains `index.html` at the artifact root, DataSpace hosts it as the transform dashboard.
+A DataSpace transform does not have to use its build step only for dataframe transformation. It can also build or transpile a browser application and emit the production bundle into `build.artifacts`. When the bundle contains `index.html` at the artifact root, DataSpace hosts it as the transform dashboard.
 
 This supports purpose-built data applications—React, Vite, or another frontend stack—not only a single generated Plotly page. The hosted application can call the DataSpace API to query parquet-backed datasets without copying an entire dataset into the artifact bundle.
 
@@ -39,7 +39,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from pyrunner_lib import build
+from dataspace_pylib import build
 
 
 def transform(input_df):

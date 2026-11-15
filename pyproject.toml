@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyrunner-lib"
+name = "dataspace-pylib"
 version = "0.7.0.dev0"
 authors = [
   { name="DataSpace", email="info@dataspace.ch" },
@@ -31,10 +31,10 @@ dev = [
 ]
 
 [project.scripts]
-pyrunner = "pyrunner_lib.__main__:main"
+dataspace-pylib = "dataspace_pylib.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/dataspaceswiss/pyrunner-lib"
+Repository = "https://github.com/dataspaceswiss/dataspace-pylib"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -44,7 +44,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "--cov=pyrunner_lib --cov-report=term-missing --cov-report=html"
+addopts = "--cov=dataspace_pylib --cov-report=term-missing --cov-report=html"
 
 [tool.black]
 target-version = ["py310"]

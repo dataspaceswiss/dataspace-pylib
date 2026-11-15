@@ -2,7 +2,7 @@
 
 ## Transform structure
 
-Place business logic in Python transform files, conventionally below `src/`. Define one function named `transform`, or one function decorated with `@transform` from `pyrunner_lib`. DataSpace refuses to save a file that defines more than one; the runner would call the function named `transform` first.
+Place business logic in Python transform files, conventionally below `src/`. Define one function named `transform`. DataSpace refuses to save a file that defines more than one.
 
 Start the file with a docstring that says what the transform produces and from what, and keep it current with the logic.
 
@@ -47,7 +47,7 @@ Writing run logs, manifests, row-count or schema summaries, "last run" markers, 
 
 | Need | Use |
 | --- | --- |
-| Facts about an input, such as its snapshot, row count, or columns | `input_df.ds_meta` |
+| Facts about an input, such as its snapshot, row count, or columns | `input_df.meta` |
 | What the previous run produced | A `Previous` parameter |
 | A rule the data must satisfy | Health checks |
 | A file a person or a downstream transform consumes | An artifact |
@@ -101,14 +101,14 @@ A formatter or lint configuration in the repository, the project's own conventio
   "dfType": "polars",
   "packages": [
     "plotly",
-    "git+https://github.com/dataspaceswiss/pyrunner-lib@<commit of feature/s3-storage>#egg=pyrunner-lib"
+    "git+https://github.com/dataspaceswiss/dataspace-pylib@<commit of feature/s3-storage>#egg=dataspace-pylib"
   ]
 }
 ```
 
-- `python` and `packages` define the image every build of the workspace runs in. A change to them makes the next build create a new image first, which takes noticeably longer than a normal build. Keep `pyrunner-lib` in `packages`, pinned to a tag.
+- `python` and `packages` define the image every build of the workspace runs in. A change to them makes the next build create a new image first, which takes noticeably longer than a normal build. Keep `dataspace-pylib` in `packages`, pinned to a tag.
 - `dfType` decides the input type for every transform of the workspace. Keep `polars` unless the repository already uses `pandas`.
-- `draftReadLimit` is optional: the number of rows a draft build reads from each input (1,000,000 when unset), or `-1` to read every row. It needs `pyrunner-lib` 0.6.1 or later; 0.6.0 always reads 1,000,000.
+- `draftReadLimit` is optional: the number of rows a draft build reads from each input (1,000,000 when unset), or `-1` to read every row. It needs `dataspace-pylib` 0.6.1 or later; 0.6.0 always reads 1,000,000.
 
 ## Connection mapping
 
@@ -124,9 +124,9 @@ Use `_connections.json` to resolve transform RIDs to source files and upstream t
 
 Whenever a mapped Python file moves or is renamed, update its `path` in `_connections.json` in the same change. A stale path breaks execution.
 
-DataSpace recognizes three input declaration forms.
+DataSpace recognizes two input declaration forms.
 
-Use a bare parameter when name-based resolution is unambiguous. This form can resolve local transforms and published transforms from a linked foreign workspace:
+Use a bare parameter for a transform of the same workspace; it is found by its name:
 
 ```python
 def transform(input):
@@ -138,27 +138,16 @@ The runner resolves an unannotated parameter by matching its name to an upstream
 Bind a parameter explicitly by RID with a parameter annotation:
 
 ```python
-from pyrunner_lib import Transform
+from dataspace_pylib import Transform
 
 
 def transform(source_data: Transform("rid.transform.source")):
     return source_data
 ```
 
-The equivalent decorator form is:
+An input from a linked foreign workspace is always declared by its RID; the resolved connection preserves cross-workspace lineage. A parameter of the type `Previous` is not an input (see Incremental builds).
 
-```python
-from pyrunner_lib import Transform, transform
-
-
-@transform(source_data=Transform("rid.transform.source"))
-def build_output(source_data):
-    return source_data
-```
-
-All three forms can declare an input from a linked foreign workspace. Prefer either explicit RID form when different workspaces contain transforms with the same name; the resolved connection preserves cross-workspace lineage.
-
-`Transform("WORKSPACE.transform")`, for example `orders: Transform("INSTACART.orders")`, is a planned DataSpace syntax and is not yet supported. Until it is implemented, use the foreign transform's RID in the annotation or decorator binding.
+`Transform("WORKSPACE.transform")`, for example `orders: Transform("INSTACART.orders")`, is a planned DataSpace syntax and is not yet supported. Until it is implemented, use the foreign transform's RID in the annotation.
 
 ### How DataSpace reads input declarations
 
@@ -166,41 +155,41 @@ DataSpace works out a transform's inputs by parsing the syntax of the source fil
 
 | Declaration | What DataSpace 1.13 reads |
 | --- | --- |
-| `name: Transform("rid.transform.x")`, also inside `Annotated[...]`, and `pyrunner_lib.Transform(...)` | Input bound to that RID. |
-| `@transform(name=Transform("rid.transform.x"))` | Input bound to that RID. |
+| `name: Transform("rid.transform.x")`, also inside `Annotated[...]`, and `dataspace_pylib.Transform(...)` | Input bound to that RID. |
 | `name: Transform(SOME_RID)` | Input bound to the value of `SOME_RID` when it is assigned exactly once in the same file, at module level, to a plain string. Otherwise the save is rejected. |
 | `name: Transform("rid." + suffix)`, an f-string, or any other computed value | The save is rejected. |
 | `name` | Input bound by name. |
 | `name=Transform("rid.transform.x")` as a default value | Bound by name, not by RID. |
 
-Write the RID as a plain string literal directly inside the call, import `Transform` with `from pyrunner_lib import Transform`, and give input parameters no default values. Older DataSpace versions silently bound constants, computed values, and some of the other forms by name, so that form is also the only one every version reads correctly.
+Write the RID as a plain string literal directly inside the call, import `Transform` with `from dataspace_pylib import Transform`, and give input parameters no default values. Older DataSpace versions silently bound constants, computed values, and some of the other forms by name, so that form is also the only one every version reads correctly.
 
 Nothing re-derives the inputs when changes arrive over git. Whenever you add, remove, or rebind an input in code, make the same change to that transform's `inputs` in `_connections.json`, using the same RIDs.
 
 The conventional entry point is:
 
 ```python
-import pyrunner_lib
+import dataspace_pylib
 
-pyrunner_lib.main()
+dataspace_pylib.main()
 ```
 
 ## The running build
 
-Build data lives in S3, but a transform never handles S3 paths or credentials: inputs arrive as parameters, the output is the returned dataframe, and everything else comes from typed objects of `pyrunner_lib`.
+Build data lives in S3, but a transform never handles S3 paths or credentials: inputs arrive as parameters, the output is the returned dataframe, and everything else comes from typed objects of `dataspace_pylib`.
 
 ```python
-from pyrunner_lib import build
+from dataspace_pylib import build
 
 build.artifacts      # pathlib.Path: local folder for this build's artifacts
 build.is_draft       # True for a build of uncommitted code
+build.is_local       # True for a build on a developer's machine, False on DataSpace
 build.id             # build RID
 build.transform_id   # transform RID
 build.branch         # branch name
 build.storage        # direct S3 access, see below
 ```
 
-Workspace secrets are environment variables named by the secret's key in the workspace settings. Do not read other environment variables of the build; they are the contract between DataSpace and `pyrunner_lib` and change without notice.
+Workspace secrets are environment variables named by the secret's key in the workspace settings. The build has no other environment variables to read: everything else comes from `build`, the inputs and a `Previous` parameter.
 
 `build.storage` is for what the rest of the API does not cover, such as writing very large files straight to S3: `build.storage.uri` is the build's folder (`s3://…/builds/<build id>`), `build.storage.options` the Polars storage options with the build's temporary credentials, and `build.storage.filesystem()` a pyarrow filesystem with the same credentials. The credentials write the build's own folder and read its previous build; an input's folder is read with `input.artifacts.storage_options`. Nothing else is reachable. Files written outside `build.artifacts` and the build's S3 folder are lost when the build ends.
 
@@ -212,14 +201,14 @@ A build of code that is not committed yet is a draft. Each input is cut to its f
 
 An input is the LazyFrame of the upstream dataset with two attributes. Annotate it as `Input` to get code completion for them.
 
-- `ds_meta`: the upstream transform ID, data snapshot ID, build ID, row and column counts, file size, creation date and columns.
+- `meta`: facts about the upstream dataset: `transform_id`, `build_id`, `snapshot_id`, `row_count`, `column_count`, `size_bytes`, `created_at` (a `datetime`) and `columns` (column name to type).
 - `artifacts`: the artifact folder of the upstream build. Nothing is fetched until asked for.
 
 ```python
 import json
 
 import polars as pl
-from pyrunner_lib import Input
+from dataspace_pylib import Input
 
 
 def transform(upstream_data: Input) -> pl.LazyFrame:
@@ -241,7 +230,7 @@ Create an interactive dashboard by writing `index.html` into it:
 
 ```python
 import plotly.express as px
-from pyrunner_lib import build
+from dataspace_pylib import build
 
 
 def transform(input_df):
@@ -268,13 +257,13 @@ Return health checks alongside the dataframe as `(dataframe, checks)`. Read [hea
 
 ## Incremental builds
 
-A parameter of the type `Previous` is the transform's own last successful, committed build on the same branch. The parameter can have any name, and it makes the transform incremental. `exists` is false on the first build; `data`, `artifacts` and `ds_meta` are those of the previous build, shaped like an input's.
+A parameter of the type `Previous` is the transform's own last successful, committed build on the same branch. The parameter can have any name, and it makes the transform incremental. `exists` is false on the first build; `data`, `artifacts` and `meta` are those of the previous build, shaped like an input's.
 
 Add rows without touching the old ones:
 
 ```python
 import polars as pl
-from pyrunner_lib import Previous
+from dataspace_pylib import Previous
 
 
 def transform(new_data: pl.LazyFrame, history: Previous):
@@ -300,21 +289,23 @@ A draft build's previous build is the last committed one, and its own output is 
 
 ## Local execution
 
-Resolve the RID from `_connections.json`, then run from the repository root:
+A clone of the workspace's repository builds on a developer's machine with the same library, from the repository root:
 
 ```bash
-uv run __main__.py <RID> <BASE_PATH>
+python -m dataspace_pylib run <transform>
 ```
 
-Example:
+`<transform>` is the transform's name (its file name without `.py`), its file, or its RID. The Python environment needs `dataspace-pylib` and the workspace's other packages from `_config.json`.
 
-```bash
-uv run __main__.py rid.transform.12345-example-uuid .
-```
+A local build works like one on DataSpace, only the place differs: the folders are below `.dataspace/` in the repository (ignored by git) instead of in S3.
 
-A dataset is every Parquet file below a `datasets` folder: the runner reads each input from `<BASE_PATH>/data/<input RID>/datasets/**/*.parquet` and writes the output as one or more files into `<BASE_PATH>/data/<RID>/datasets/` (replacing what an earlier run left there), with column lineage in `<BASE_PATH>/data/<RID>/meta/columns.json`. On the platform the inputs and the output are `s3://` build folders instead, and lineage is written to `META_FOLDER`.
+- **Every run is a build of its own**, `.dataspace/<transform>/builds/0001/`, `0002/`, …, with `datasets/`, `artifacts/` and `meta/` (`columns.json`, `health_report.json`). A build that succeeded holds the file `SUCCESS`. The last three successful builds are kept.
+- **An input is the latest successful local build of the upstream transform.** Build the upstream transforms first, in their order.
+- **Mock data stands in for a transform that is not built here**: Parquet files in `.dataspace/<transform>/mock/datasets/`, and `mock/artifacts/` when the code reads artifacts. For a transform of another workspace the folder is named by its RID, `.dataspace/<rid>/mock/`. Mock data only counts while the transform has no successful local build.
+- **The previous build** of a `Previous` parameter is the transform's own last successful local build, so incremental logic runs locally as on DataSpace: the first run has no previous build, each later one has.
+- `build.is_local` is true, `build.is_draft` false, and every row of an input is read.
 
-Locally, provide the input files and set `ARTIFACT_FOLDER`, the folder behind `build.artifacts`, for example `ARTIFACT_FOLDER=./data/<RID>/artifacts`. `META_FOLDER` is required as soon as the transform returns health checks. Set workspace secrets the code needs. To test an incremental run, set `DS_PREVIOUS` to a JSON object with the `uri` of a folder that holds an earlier output (`datasets/`, `artifacts/`) and its `meta`, for example `{"uri": "./data/previous", "meta": {}}`.
+Set the workspace secrets the code needs as environment variables. A local build cannot read data from DataSpace or write to it.
 
 ## Official documentation
 
