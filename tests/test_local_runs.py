@@ -239,6 +239,40 @@ def test_the_decorator_marks_a_transform_of_another_name_and_binds_its_inputs(
     assert workspace.data("bound")["id"].to_list() == [1, 2, 3, 9]
 
 
+def test_a_decorated_function_imported_from_another_transform_is_not_the_transform(
+    workspace,
+):
+    workspace.add(
+        "a_helper",
+        "import polars as pl\n"
+        "from dataspace_pylib import transform\n"
+        "@transform\n"
+        "def a_first(): return pl.LazyFrame({'from': ['a_helper']})\n",
+    )
+    workspace.add(
+        "user",
+        "import polars as pl\n"
+        "from dataspace_pylib import transform\n"
+        "from a_helper import a_first\n"
+        "@transform\n"
+        "def z_last(): return pl.LazyFrame({'from': ['user']})\n",
+    )
+
+    # Started as the command does it, where the workspace is not Python's own first import folder
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from dataspace_pylib.__main__ import main; main()",
+            "run",
+            "user",
+        ],
+        check=True,
+    )
+
+    assert workspace.data("user")["from"].to_list() == ["user"]
+
+
 def test_artifacts_are_in_the_build_folder_and_downstream_reads_them_in_place(
     workspace,
 ):

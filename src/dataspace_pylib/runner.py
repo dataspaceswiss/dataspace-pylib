@@ -767,6 +767,9 @@ def _run_transform() -> None:
     build = _build()
     config, connections = load_configuration()
     _df_type = config.dataframe
+    # A transform imports the workspace's other files by name, however Python was started
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
 
     connection = next((c for c in connections if c.id == build.transformId), None)
     if connection is None:
@@ -782,7 +785,10 @@ def _run_transform() -> None:
             (
                 member
                 for _, member in inspect.getmembers(module)
-                if callable(member) and getattr(member, "_dataspace_transform", False)
+                if callable(member)
+                and getattr(member, "_dataspace_transform", False)
+                # Its own function, not a decorated one it imported from another transform
+                and getattr(member, "__module__", None) == module.__name__
             ),
             None,
         )
