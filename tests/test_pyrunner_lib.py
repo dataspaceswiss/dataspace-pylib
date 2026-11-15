@@ -147,60 +147,55 @@ class TestWriteColumnTraceFile:
 
 class TestWriteDfToParquet:
     """Test write_df_to_parquet function."""
-    
-    def test_write_polars_lazyframe(self):
-        """Test writing Polars LazyFrame."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            df = pl.LazyFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-            file_path = os.path.join(temp_dir, "test.parquet")
-            
-            with patch('pyrunner_lib.pyrunner_lib.write_column_trace_file') as mock_trace:
-                write_df_to_parquet(df, file_path, "test_transform", temp_dir)
-                
-                # Check that the file was created
-                assert os.path.exists(file_path)
-                mock_trace.assert_called_once()
-    
-    def test_write_polars_dataframe(self):
-        """Test writing Polars DataFrame."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-            file_path = os.path.join(temp_dir, "test.parquet")
-            
-            write_df_to_parquet(df, file_path, "test_transform", temp_dir)
-            
-            # Check that the file was created
-            assert os.path.exists(file_path)
-    
-    def test_write_pandas_dataframe(self):
-        """Test writing Pandas DataFrame."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-            file_path = os.path.join(temp_dir, "test.parquet")
-            
-            write_df_to_parquet(df, file_path, "test_transform", temp_dir)
-            
-            # Check that the file was created
-            assert os.path.exists(file_path)
-    
-    def test_write_unsupported_type(self):
-        """Test writing unsupported dataframe type."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            df = "not a dataframe"
-            file_path = os.path.join(temp_dir, "test.parquet")
-            
-            with pytest.raises(DataWriteError, match="Failed to write Parquet file"):
-                write_df_to_parquet(df, file_path, "test_transform", temp_dir)
-    
-    def test_write_error(self):
-        """Test write error handling."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            df = pl.DataFrame({"a": [1, 2, 3]})
-            # Use invalid path to cause error
-            file_path = "/invalid/path/test.parquet"
-            
-            with pytest.raises(DataWriteError, match="Failed to write Parquet file"):
-                write_df_to_parquet(df, file_path, "test_transform", temp_dir)
+
+    @pytest.mark.parametrize(
+        "df",
+        [
+            pl.LazyFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+        ],
+        ids=["polars lazy", "polars eager", "pandas"],
+    )
+    def test_write_creates_the_dataset_folder(self, df, tmp_path):
+        folder = tmp_path / "data" / "rid" / "datasets"
+
+        with patch("pyrunner_lib.pyrunner_lib.write_column_trace_file") as mock_trace:
+            write_df_to_parquet(df, str(folder), "test_transform", str(tmp_path))
+
+        assert [p.name for p in folder.iterdir()] == ["00000000.parquet"]
+        assert pl.read_parquet(folder / "*.parquet").to_dict(as_series=False) == {"a": [1, 2, 3], "b": [4, 5, 6]}
+        assert mock_trace.call_count == (1 if isinstance(df, pl.LazyFrame) else 0)
+
+    def test_write_splits_a_large_output_into_files(self, tmp_path):
+        folder = tmp_path / "datasets"
+
+        # Each row is 8 bytes in memory, so the 8 MB of this frame fill eight files
+        with patch("pyrunner_lib.pyrunner_lib.DATASET_PART_BYTES", 1_000_000):
+            write_df_to_parquet(pl.DataFrame({"a": range(1_000_000)}), str(folder), "test_transform", str(tmp_path))
+
+        assert len(list(folder.iterdir())) == 8
+        assert pl.read_parquet(folder / "*.parquet")["a"].to_list() == list(range(1_000_000))
+
+    def test_write_replaces_the_files_of_an_earlier_local_run(self, tmp_path):
+        folder = tmp_path / "datasets"
+        folder.mkdir()
+        pl.DataFrame({"a": [9]}).write_parquet(folder / "data.parquet")
+
+        write_df_to_parquet(pl.DataFrame({"a": [1]}), str(folder), "test_transform", str(tmp_path))
+
+        assert pl.read_parquet(folder / "*.parquet")["a"].to_list() == [1]
+
+    def test_write_unsupported_type(self, tmp_path):
+        with pytest.raises(DataWriteError, match="Failed to write Parquet file"):
+            write_df_to_parquet("not a dataframe", str(tmp_path / "datasets"), "test_transform", str(tmp_path))
+
+    def test_write_error(self, tmp_path):
+        blocked = tmp_path / "file"
+        blocked.write_text("not a folder")
+
+        with pytest.raises(DataWriteError, match="Failed to write Parquet file"):
+            write_df_to_parquet(pl.DataFrame({"a": [1]}), str(blocked / "datasets"), "test_transform", str(tmp_path))
 
 
 class TestLoadModule:
@@ -267,30 +262,20 @@ class TestReadParquetFiles:
                 assert "input1" in result
                 mock_scan.assert_called_once()
     
-    def test_read_parquet_files_pandas(self):
-        """Test reading parquet files with Pandas."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create test parquet file
-            df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-            parquet_path = os.path.join(temp_dir, "data.parquet")
-            df.to_parquet(parquet_path)
-            
-            # Create connection
-            conn = Connection(
-                id="test_conn",
-                path="/path/to/transform.py",
-                inputs=["input1"]
-            )
-            connections = {"input1": conn}
-            
-            with patch('pyrunner_lib.pyrunner_lib.DF_TYPE', 'pandas'), patch('pyrunner_lib.pyrunner_lib.pd.read_parquet') as mock_read:
-                mock_read.return_value = pd.DataFrame({"a": [1, 2, 3]})
-                    
-                result = read_parquet_files(connections, {"input1": "input1"}, temp_dir)
-                    
-                assert "input1" in result
-                mock_read.assert_called_once()
-    
+    def test_read_parquet_files_pandas(self, tmp_path):
+        """pandas reads every Parquet file of the dataset folder, also in subfolders, and nothing else."""
+        folder = tmp_path / "data" / "test_conn" / "datasets"
+        (folder / "year=2026").mkdir(parents=True)
+        pd.DataFrame({"a": [1, 2]}).to_parquet(folder / "data.parquet")
+        pd.DataFrame({"a": [3]}).to_parquet(folder / "year=2026" / "00000000.parquet")
+        (folder / "data.csv").write_text("a\n99\n")
+        connections = {"input1": Connection(id="test_conn", path="/path/to/transform.py", inputs=[])}
+
+        with patch("pyrunner_lib.pyrunner_lib.DF_TYPE", "pandas"):
+            result = read_parquet_files(connections, {"input1": "input1"}, str(tmp_path))
+
+        assert sorted(result["input1"]["a"]) == [1, 2, 3]
+
     def test_read_parquet_files_missing_connection(self):
         """Test reading parquet files with missing connection."""
         connections = {}
@@ -494,7 +479,7 @@ def transform(input1):
 
 class TestStorageOptions:
     def test_picks_the_credentials_of_the_folder(self, monkeypatch):
-        from pyrunner_lib import storage_options
+        from pyrunner_lib.pyrunner_lib import storage_options
 
         monkeypatch.setenv("DS_S3_ENDPOINT", "http://storage:9000")
         monkeypatch.setenv("DS_S3_REGION", "us-east-1")

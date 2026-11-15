@@ -67,8 +67,13 @@ def _format_column_sources(
     for column, sources in column_sources.items():
         formatted: set[_Source] = set()
         for file_path, source_column in sources:
-            if file_path in source_names:
-                dataset_rid = source_names[file_path]
+            named = [
+                rid
+                for prefix, rid in source_names.items()
+                if file_path.startswith(prefix)
+            ]
+            if named:
+                dataset_rid = named[0]
             else:
                 match = rid_pattern.search(file_path)
                 dataset_rid = match.group(0) if match else file_path
@@ -117,6 +122,10 @@ class InputSourceTracer:
 
         self._source_names = source_names or {}
         self._storage_options = storage_options
+
+        # Polars 1.41 to 1.43 never return from visit() when the plan scans a CSV or NDJSON file in S3
+        # whose schema is not resolved yet; resolving it first avoids that.
+        lazyframe.collect_schema()
 
         # NodeTraverser is Polars' versioned plugin interface for optimized IR.
         # It is not public, so reject unknown major versions instead of guessing.
@@ -241,26 +250,42 @@ class InputSourceTracer:
 
     def _scan(self, node: Any, output_names: list[str]) -> _PlanState:
         columns: dict[str, _ColumnLineage] = {}
+        # The files of one dataset share a schema, so it is read once per dataset folder instead of once per file
+        schemas: dict[str, set[str]] = {}
         for path in node.paths:
             file_path = path.removeprefix("file://")
-            try:
-                storage_options = (
-                    self._storage_options(file_path) if self._storage_options else None
-                )
-                if storage_options:
-                    schema = pl.scan_parquet(
-                        file_path, storage_options=storage_options
-                    ).collect_schema()
-                    physical_columns = set(schema.names())
-                else:
-                    physical_columns = set(pl.read_parquet_schema(file_path))
-            except Exception:  # noqa: BLE001, S112
+            dataset = next(
+                (
+                    prefix
+                    for prefix in self._source_names
+                    if file_path.startswith(prefix)
+                ),
+                file_path,
+            )
+            physical_columns = schemas.get(dataset) or self._physical_columns(file_path)
+            if physical_columns is None:
                 continue
+            schemas[dataset] = physical_columns
             for name in output_names:
                 if name in physical_columns:
                     lineage = columns.setdefault(name, _ColumnLineage())
                     lineage.sources.add((file_path, name))
         return self._state(output_names, columns)
+
+    def _physical_columns(self, file_path: str) -> set[str] | None:
+        """The columns stored in a Parquet file; None when it cannot be read as one."""
+        try:
+            storage_options = (
+                self._storage_options(file_path) if self._storage_options else None
+            )
+            if storage_options:
+                schema = pl.scan_parquet(
+                    file_path, storage_options=storage_options
+                ).collect_schema()
+                return set(schema.names())
+            return set(pl.read_parquet_schema(file_path))
+        except Exception:  # noqa: BLE001
+            return None
 
     def _named_expressions(
         self, expressions: Iterable[Any], input_state: _PlanState
@@ -532,8 +557,8 @@ def trace_lazyframe_sources(
 ) -> dict[str, list[dict[str, str]]]:
     """Trace a live LazyFrame using Polars' optimized, structured query plan.
 
-    source_names maps a scanned path to its transform id, for paths that do not contain
-    the id, such as S3 build folders. storage_options returns the options to read the
+    source_names maps the start of a scanned path (a dataset folder) to its transform id, for paths
+    that do not contain the id, such as S3 build folders. storage_options returns the options to read the
     schema of a scanned path, or None when it needs none.
     """
     return InputSourceTracer(

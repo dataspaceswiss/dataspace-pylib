@@ -39,11 +39,12 @@ import os
 from pathlib import Path
 import subprocess
 
+from pyrunner_lib import build
+
 
 def transform(input_df):
     frontend_dir = Path(__file__).parent / "dashboard"
-    artifact_dir = Path(os.environ["ARTIFACT_FOLDER"])
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = build.artifacts
 
     # Do not expose the transform's complete secret-bearing environment to
     # frontend build plugins or package lifecycle scripts.
@@ -66,7 +67,7 @@ def transform(input_df):
         raise RuntimeError("Dashboard build timed out after 300 seconds") from error
 
     if not (artifact_dir / "index.html").is_file():
-        raise RuntimeError("Dashboard build did not emit ARTIFACT_FOLDER/index.html")
+        raise RuntimeError("Dashboard build did not emit index.html into build.artifacts")
 
     return input_df
 ```
@@ -75,7 +76,7 @@ Adapt this example to the checked-in lockfile and package manager. Extend the ch
 
 For bundlers such as Vite:
 
-- Emit the production output directly into `ARTIFACT_FOLDER`, or build elsewhere and copy the complete output tree there.
+- Emit the production output directly into `build.artifacts`, or build elsewhere and copy the complete output tree there.
 - Configure a relative asset base such as `./` when the application is served below a nested artifact URL.
 - Keep every hashed JavaScript, CSS, font, image, worker, and WebAssembly asset referenced by `index.html` inside the artifact tree.
 - Check bundler `public/` assets, dynamic imports, manifest icons, service workers, and runtime-configuration fetches for the same relative-base behavior.
@@ -122,7 +123,7 @@ Validate both halves of the feature:
 
 1. Run the repository's locked frontend checks and production build.
 2. Run the transform locally when its DataSpace fixtures and environment are available.
-3. Confirm `ARTIFACT_FOLDER/index.html` and every referenced static asset exist.
+3. Confirm `index.html` in `build.artifacts` and every referenced static asset exist.
 4. Serve the artifact directory below a nested path locally, or use the hosted preview, and verify that no asset assumes `/` as its base.
 5. Test API requests in the hosted authenticated context with a small query, no results, invalid input, expired authorization, and a server failure.
 6. Confirm filters and row limits reach the API rather than being applied only after a full download.

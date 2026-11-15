@@ -48,7 +48,7 @@ Writing run logs, manifests, row-count or schema summaries, "last run" markers, 
 | Need | Use |
 | --- | --- |
 | Facts about an input, such as its snapshot, row count, or columns | `input_df.ds_meta` |
-| What the previous run produced | `PREVIOUS_DATASET_PATH` |
+| What the previous run produced | A `Previous` parameter |
 | A rule the data must satisfy | Health checks |
 | A file a person or a downstream transform consumes | An artifact |
 
@@ -101,7 +101,7 @@ A formatter or lint configuration in the repository, the project's own conventio
   "dfType": "polars",
   "packages": [
     "plotly",
-    "git+https://github.com/dataspaceswiss/pyrunner-lib@v0.7.0-beta#egg=pyrunner-lib"
+    "git+https://github.com/dataspaceswiss/pyrunner-lib@<commit of feature/s3-storage>#egg=pyrunner-lib"
   ]
 }
 ```
@@ -185,28 +185,24 @@ import pyrunner_lib
 pyrunner_lib.main()
 ```
 
-## Injected environment
+## The running build
 
-Use the exact paths injected by DataSpace. Build data lives in S3; `ARTIFACT_FOLDER` and `META_FOLDER` are local directories whose contents the runner uploads to S3 when the transform finishes, also when it fails.
+Build data lives in S3, but a transform never handles S3 paths or credentials: inputs arrive as parameters, the output is the returned dataframe, and everything else comes from typed objects of `pyrunner_lib`.
 
-| Variable | Meaning |
-| --- | --- |
-| `TRANSFORM_ID` | Current transform RID. |
-| `ARTIFACT_FOLDER` | Local directory for persisted artifacts from the current build. |
-| `META_FOLDER` | Local directory for generated metadata such as health reports. |
-| `DATASET_FOLDER` | `s3://` folder that receives the returned dataframe's parquet dataset. |
-| `PREVIOUS_BUILD_FOLDER` | `s3://` folder of the previous build of the current transform. |
-| `PREVIOUS_DATASET_PATH` | `s3://` path of the previous generated dataset. |
-| `PREVIOUS_ARTIFACT_FOLDER` | `s3://` folder of the previous build's artifacts. |
-| `DS_BUILD_URI`, `DS_INPUTS`, `DS_S3_*` | Where the build's data lives in S3 and the temporary credentials for it; use `storage_options(path)` instead of reading them. |
-| `DS_META` | JSON with the metadata of every input; read it through `ds_meta` instead. |
-| `IS_DRAFT_BUILD` | `true` for a draft build. |
-| `DRAFT_READ_LIMIT` | Rows a draft build reads from each input (`-1`: all), when `_config.json` sets `draftReadLimit`. |
-| One variable per workspace secret | Named by the secret's key in the workspace settings. |
+```python
+from pyrunner_lib import build
 
-The `PREVIOUS_*` variables are set only when the transform has an earlier successful, non-draft build on the same branch.
+build.artifacts      # pathlib.Path: local folder for this build's artifacts
+build.is_draft       # True for a build of uncommitted code
+build.id             # build RID
+build.transform_id   # transform RID
+build.branch         # branch name
+build.storage        # direct S3 access, see below
+```
 
-An `s3://` path needs credentials: `storage_options(path)` from `pyrunner_lib` returns them for any path the build may access (and `None` for a local path), so `pl.scan_parquet(path, storage_options=storage_options(path))` works on DataSpace and locally. The build can write its own folder and read its previous build and its inputs, nothing else; read inputs through the transform parameters. The credentials are not in the `AWS_*` variables, so a transform's own AWS clients are unaffected. Files outside `ARTIFACT_FOLDER` and `META_FOLDER` are ephemeral and are not persisted.
+Workspace secrets are environment variables named by the secret's key in the workspace settings. Do not read other environment variables of the build; they are the contract between DataSpace and `pyrunner_lib` and change without notice.
+
+`build.storage` is for what the rest of the API does not cover, such as writing very large files straight to S3: `build.storage.uri` is the build's folder (`s3://…/builds/<build id>`), `build.storage.options` the Polars storage options with the build's temporary credentials, and `build.storage.filesystem()` a pyarrow filesystem with the same credentials. The credentials write the build's own folder and read its previous build; an input's folder is read with `input.artifacts.storage_options`. Nothing else is reachable. Files written outside `build.artifacts` and the build's S3 folder are lost when the build ends.
 
 ## Draft builds
 
@@ -214,39 +210,38 @@ A build of code that is not committed yet is a draft. Each input is cut to its f
 
 ## Input metadata and upstream artifacts
 
-Input dataframes expose `ds_meta`. Available metadata includes the upstream transform ID, data snapshot ID, build ID, row and column counts, file size, creation date, columns, and artifact directory.
+An input is the LazyFrame of the upstream dataset with two attributes. Annotate it as `Input` to get code completion for them.
 
-On DataSpace the artifact directory is an `s3://` folder, readable with `ds_meta.storage_options`, the read-only credentials for that input (the same that `storage_options(path)` returns for a path below it). Polars takes them directly, for example `pl.scan_csv(f"{artifact_dir}/summary.csv", storage_options=options)`; other libraries need a filesystem:
+- `ds_meta`: the upstream transform ID, data snapshot ID, build ID, row and column counts, file size, creation date and columns.
+- `artifacts`: the artifact folder of the upstream build. Nothing is fetched until asked for.
 
 ```python
-import pyarrow.fs as pafs
+import json
+
+import polars as pl
+from pyrunner_lib import Input
 
 
-def transform(upstream_data):
-    options = upstream_data.ds_meta.storage_options
-    fs = pafs.S3FileSystem(
-        access_key=options["aws_access_key_id"],
-        secret_key=options["aws_secret_access_key"],
-        session_token=options["aws_session_token"],
-        endpoint_override=options["aws_endpoint_url"],
-        region=options["aws_region"],
-    )
-    artifact_dir = upstream_data.ds_meta.artifact_dir.removeprefix("s3://")
-    with fs.open_input_stream(f"{artifact_dir}/summary.json") as f:
-        summary = f.read()
+def transform(upstream_data: Input) -> pl.LazyFrame:
+    artifacts = upstream_data.artifacts
+    names = artifacts.list("raw/*.csv")                            # paths relative to the folder; * also matches /
+    summary = json.loads(artifacts.get("summary.json").read_text())  # one file, as a local pathlib.Path
+    raw = artifacts.get("raw")                                     # a folder; artifacts.get() is the whole artifact folder
+    big = pl.scan_csv(artifacts.uri("raw/big.csv"), storage_options=artifacts.storage_options)  # read in place
     return upstream_data
 ```
 
+`get` returns a real local path, so `open`, `glob` and any library work with it; a path is fetched once per build. Fetch single files or subfolders when the folder is large, and let Polars read large files in place with `uri` and `storage_options`. Do not reconstruct another transform's artifact path.
+
 ## Artifacts and dashboards
 
-Write general artifacts such as JSON, CSV, or images under `ARTIFACT_FOLDER`.
+Write artifacts such as JSON, CSV, or images into `build.artifacts`, a local folder. What is in it when the transform ends is stored with the build, also after the transform raised an error.
 
-Create an interactive dashboard by writing `{ARTIFACT_FOLDER}/index.html`:
+Create an interactive dashboard by writing `index.html` into it:
 
 ```python
-import os
-
 import plotly.express as px
+from pyrunner_lib import build
 
 
 def transform(input_df):
@@ -257,7 +252,7 @@ def transform(input_df):
         .to_pandas()
     )
     figure = px.bar(frame, x="category", y="value")
-    figure.write_html(os.path.join(os.environ["ARTIFACT_FOLDER"], "index.html"))
+    figure.write_html(build.artifacts / "index.html")
     return input_df
 ```
 
@@ -265,7 +260,7 @@ Keep any local dashboard materialization explicitly bounded and project only the
 
 If no `index.html` exists, DataSpace serves the artifact folder as a file listing.
 
-For a full browser application, the transform build can compile React, Vite, or another frontend into `ARTIFACT_FOLDER`. Keep `index.html` at the artifact root and make bundled asset URLs work from the nested hosted artifact path. Read [interactive-dashboards.md](interactive-dashboards.md) for the build, hosting, and DataSpace API query pattern.
+For a full browser application, the transform build can compile React, Vite, or another frontend into `build.artifacts`. Keep `index.html` at the artifact root and make bundled asset URLs work from the nested hosted artifact path. Read [interactive-dashboards.md](interactive-dashboards.md) for the build, hosting, and DataSpace API query pattern.
 
 ## Health checks
 
@@ -273,25 +268,35 @@ Return health checks alongside the dataframe as `(dataframe, checks)`. Read [hea
 
 ## Incremental builds
 
-Read `PREVIOUS_DATASET_PATH` only when it is present. It is an `s3://` path, so do not check it with `os.path`.
+A parameter of the type `Previous` is the transform's own last successful, committed build on the same branch. The parameter can have any name, and it makes the transform incremental. `exists` is false on the first build; `data`, `artifacts` and `ds_meta` are those of the previous build, shaped like an input's.
+
+Add rows without touching the old ones:
 
 ```python
-import os
-
 import polars as pl
-from pyrunner_lib import storage_options
+from pyrunner_lib import Previous
 
 
-def transform(new_data: pl.LazyFrame) -> pl.LazyFrame:
-    previous_path = os.environ.get("PREVIOUS_DATASET_PATH")
-    if not previous_path:
+def transform(new_data: pl.LazyFrame, history: Previous):
+    return history.append(new_data)
+```
+
+`append` keeps the files of the previous dataset as they are and writes the new rows as additional files. The previous rows are neither read nor written again, so the build costs what the new rows cost, however large the dataset is. The new rows must have exactly the columns and types of the previous dataset, otherwise the build fails. On the first build the rows are the dataset. Health checks still run on the whole dataset.
+
+Read and rewrite the dataset when old rows must change, for example to deduplicate or update by key:
+
+```python
+def transform(new_data: pl.LazyFrame, history: Previous) -> pl.LazyFrame:
+    if not history.exists:
         return new_data
-
-    previous_data = pl.scan_parquet(previous_path, storage_options=storage_options(previous_path))
-    return pl.concat([previous_data, new_data]).unique()
+    return pl.concat([history.data, new_data]).unique("id", keep="last")
 ```
 
 Choose merge and deduplication keys from the domain model; do not assume whole-row uniqueness is correct for every pipeline.
+
+State that is not a dataset goes through artifacts: write it into `build.artifacts` and read the previous one with `history.artifacts.get("state.json")`.
+
+A draft build's previous build is the last committed one, and its own output is never the previous build of a later run.
 
 ## Local execution
 
@@ -307,9 +312,9 @@ Example:
 uv run __main__.py rid.transform.12345-example-uuid .
 ```
 
-The runner reads each input from `<BASE_PATH>/data/<input RID>/datasets/data.parquet` and writes the output to `<BASE_PATH>/data/<RID>/datasets/data.parquet`, with column lineage in `<BASE_PATH>/data/<RID>/meta/columns.json`. On the platform the inputs and the output are `s3://` build folders instead, and lineage is written to `META_FOLDER`.
+A dataset is every Parquet file below a `datasets` folder: the runner reads each input from `<BASE_PATH>/data/<input RID>/datasets/**/*.parquet` and writes the output as one or more files into `<BASE_PATH>/data/<RID>/datasets/` (replacing what an earlier run left there), with column lineage in `<BASE_PATH>/data/<RID>/meta/columns.json`. On the platform the inputs and the output are `s3://` build folders instead, and lineage is written to `META_FOLDER`.
 
-Locally, provide the input files and set the environment variables the transform reads, pointing into the same tree, for example `ARTIFACT_FOLDER=./data/<RID>/artifacts`. `META_FOLDER` is required as soon as the transform returns health checks. Set workspace secrets the code needs, and `PREVIOUS_*` only to test an incremental run.
+Locally, provide the input files and set `ARTIFACT_FOLDER`, the folder behind `build.artifacts`, for example `ARTIFACT_FOLDER=./data/<RID>/artifacts`. `META_FOLDER` is required as soon as the transform returns health checks. Set workspace secrets the code needs. To test an incremental run, set `DS_PREVIOUS` to a JSON object with the `uri` of a folder that holds an earlier output (`datasets/`, `artifacts/`) and its `meta`, for example `{"uri": "./data/previous", "meta": {}}`.
 
 ## Official documentation
 

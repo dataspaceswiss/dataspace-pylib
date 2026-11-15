@@ -9,7 +9,7 @@ Develop DataSpace transforms while preserving pipeline wiring, lineage, persiste
 
 ## Compatibility
 
-This skill describes `pyrunner-lib==0.7.0b0` (tag `v0.7.0-beta`) running on DataSpace 1.15.0. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
+This skill describes `pyrunner-lib` 0.7.0 as it is being developed (`0.7.0.dev0`, branch `feature/s3-storage`) running on DataSpace 1.15.0. A project declares its version as the `pyrunner-lib` entry in the `packages` of `_config.json`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
 
 ## Workflow
 
@@ -54,12 +54,12 @@ Git access goes over HTTPS with the user's DataSpace email and password and need
 
 ## Task Guidance
 
-- For upstream artifacts, read `input_df.ds_meta.artifact_dir` with `input_df.ds_meta.storage_options`; do not reconstruct another transform's artifact path.
+- For upstream artifacts, use `input_df.artifacts`: `list()` to see the files, `get(path)` for a local copy, `uri(path)` with `storage_options` to let Polars read a large file in place. Do not reconstruct another transform's artifact path.
 - Never collect an unbounded `LazyFrame` in the transform process. Project required columns and use bounded samples, scalar aggregates, or server-side queries.
-- For dashboards, write `index.html` inside `ARTIFACT_FOLDER`. A transform may use its build step to compile a React, Vite, or other browser application into that directory; DataSpace then hosts the emitted application as transform artifacts.
+- For artifacts and dashboards, write into `build.artifacts` (`from pyrunner_lib import build`), with `index.html` at its root for a dashboard. A transform may use its build step to compile a React, Vite, or other browser application into that directory; DataSpace then hosts the emitted application as transform artifacts.
 - For API-backed dashboards, discover the exact query contract from the current DataSpace deployment or an existing project client. Query parquet-backed data server-side with projection, filtering, and row limits; never invent an endpoint or embed credentials in the bundle.
 - For health checks, return `(dataframe, checks)`, register checks with `Check` builders, and choose `severity="fail"` only when a failed check should fail the build.
-- For incremental transforms, treat `PREVIOUS_DATASET_PATH` as the `s3://` path of the previous generated dataset: guard for a missing previous build by checking that the variable is set, and read it with `storage_options(path)` from `pyrunner_lib`.
+- For incremental transforms, add a parameter of the type `Previous`: return `history.append(new_rows)` to add rows without rewriting the old ones, or check `history.exists` and combine `history.data` with the new rows when old rows must change.
 - Read workspace secrets from environment variables named by their key in the workspace settings. Never hardcode a secret, print it, or write it to a dataset, artifact, or log.
 - A draft build runs uncommitted code on the first `draftReadLimit` rows of each input (`_config.json`, 1,000,000 by default, `-1` for all rows), and committed builds never read its output. Do not treat its row counts as final.
 - DataSpace supports bare transform parameters, explicit `Transform("rid.transform...")` parameter annotations, and explicit `@transform(input=Transform("rid.transform..."))` decorator bindings for both local and linked foreign-workspace inputs. Read the connection-mapping section of [references/pipeline-runtime.md](references/pipeline-runtime.md) before declaring inputs from another workspace.

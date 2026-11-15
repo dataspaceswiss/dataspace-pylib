@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import importlib.util
 import inspect
 import json
 import os
 import shutil
 import sys
+import tempfile
 import time
+import typing
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar
@@ -15,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 import pandas as pd  # type: ignore[import-untyped]
 import polars as pl
 import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.dataset as pads  # type: ignore[import-untyped]
 import pyarrow.fs as pafs  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
@@ -64,13 +68,8 @@ class DataWriteError(PyrunnerError):
 class DSMeta:
     """Metadata for a dataset with dot notation access."""
 
-    def __init__(
-        self, rid: str, base_path: str, ds_meta_data: dict[str, Any] | None = None
-    ):
+    def __init__(self, rid: str, ds_meta_data: dict[str, Any] | None = None):
         self.transform_id = rid
-        self.artifact_dir = f"{build_folder(rid, base_path)}/artifacts"
-        # Needed to read artifact_dir when it is an s3:// path; None for local paths.
-        self.storage_options = input_storage_options(rid)
 
         # Every field is None when DS_META has nothing for this dataset
         ds_meta_data = ds_meta_data or {}
@@ -118,13 +117,16 @@ def _storage_options(credentials: dict[str, str] | None = None) -> dict[str, str
     }
 
 
-def _s3_filesystem(storage_options: dict[str, str]) -> pafs.S3FileSystem:
+def _s3_filesystem(
+    storage_options: dict[str, str], request_timeout: float | None = None
+) -> pafs.S3FileSystem:
     return pafs.S3FileSystem(
         access_key=storage_options["aws_access_key_id"],
         secret_key=storage_options["aws_secret_access_key"],
         session_token=storage_options["aws_session_token"],
         endpoint_override=storage_options["aws_endpoint_url"],
         region=storage_options["aws_region"],
+        request_timeout=request_timeout,
         allow_bucket_creation=False,
         check_directory_existence_before_creation=False,
     )
@@ -179,6 +181,194 @@ def upload_build_folders() -> None:
                     shutil.copyfileobj(src, dst)
 
 
+def _filesystem(path: str) -> tuple[pafs.FileSystem, str]:
+    """The filesystem of a path of this build, its previous build or an input, and the path in it."""
+    options = storage_options(path)
+    if options is None:
+        return pafs.LocalFileSystem(), path
+    return _s3_filesystem(options), path.removeprefix("s3://")
+
+
+def _dataset_files(dataset_folder: str) -> list[str]:
+    """The Parquet files of a dataset folder, relative to it."""
+    fs, folder = _filesystem(dataset_folder)
+    return sorted(
+        info.path.removeprefix(folder + "/")
+        for info in fs.get_file_info(pafs.FileSelector(folder, recursive=True, allow_not_found=True))
+        if info.type == pafs.FileType.File and info.path.endswith(".parquet")
+    )
+
+
+# The API transforms use
+
+
+class Artifacts:
+    """The artifact folder of an input, or of the previous build. Nothing is fetched until asked for."""
+
+    def __init__(self, folder: str):
+        self._folder = folder
+        self._local: dict[str, Path] = {}
+
+    def uri(self, path: str = "") -> str:
+        """Where a file or folder is stored, to read it in place together with ``storage_options``:
+        ``pl.scan_csv(artifacts.uri("big.csv"), storage_options=artifacts.storage_options)``."""
+        return f"{self._folder}/{path}".rstrip("/")
+
+    @property
+    def storage_options(self) -> dict[str, str] | None:
+        """The Polars storage options with the credentials to read this folder; None for a local folder."""
+        return storage_options(self._folder)
+
+    def list(self, pattern: str = "*") -> list[str]:
+        """The files below the folder whose path matches the pattern, as paths relative to the folder.
+        ``*`` matches any characters, also ``/``: ``list("raw/*.csv")``."""
+        fs, folder = _filesystem(self._folder)
+        selector = pafs.FileSelector(folder, recursive=True, allow_not_found=True)
+        files = (
+            info.path.removeprefix(folder + "/")
+            for info in fs.get_file_info(selector)
+            if info.type == pafs.FileType.File
+        )
+        return sorted(file for file in files if fnmatch.fnmatchcase(file, pattern))
+
+    def get(self, path: str = "") -> Path:
+        """A local copy of a file or folder, for code that needs local files; the whole artifact folder
+        without a path. Fetched on the first call and reused afterwards."""
+        path = path.strip("/")
+        if path not in self._local:
+            fs, source = _filesystem(self.uri(path))
+            source_type = fs.get_file_info(source).type
+            if source_type == pafs.FileType.NotFound:
+                raise FileNotFoundError(f"There is no artifact '{path}' in {self._folder}")
+            if isinstance(fs, pafs.LocalFileSystem):
+                self._local[path] = Path(source)
+            else:
+                target = os.path.join(tempfile.mkdtemp(prefix="ds-artifacts-"), os.path.basename(source))
+                if source_type == pafs.FileType.Directory:
+                    # copy_files only creates the subfolders
+                    os.makedirs(target)
+                pafs.copy_files(
+                    source, target, source_filesystem=fs, destination_filesystem=pafs.LocalFileSystem()
+                )
+                self._local[path] = Path(target)
+        return self._local[path]
+
+
+class Input(pl.LazyFrame):
+    """The type of an input, for code completion: ``def transform(orders: Input)``. An input is the
+    LazyFrame of the upstream dataset with these two attributes; the class itself is never created."""
+
+    artifacts: Artifacts
+    ds_meta: DSMeta
+
+
+class Append:
+    """What ``Previous.append`` returns: the rows to add to the files of the previous dataset."""
+
+    def __init__(self, frame: pl.LazyFrame | pl.DataFrame):
+        if not isinstance(frame, pl.LazyFrame | pl.DataFrame):
+            raise TypeError(f"append needs a Polars frame, not {type(frame).__name__}")
+        self.frame = frame
+
+
+class Previous:
+    """The last successful committed build of this transform on this branch. A parameter with this
+    type makes a transform incremental: ``def transform(orders, history: Previous)``."""
+
+    def __init__(self, transform_id: str):
+        previous = json.loads(os.environ["DS_PREVIOUS"]) if os.environ.get("DS_PREVIOUS") else None
+        self.exists: bool = previous is not None
+        self._transform_id = transform_id
+        self._uri: str | None = previous["uri"] if previous else None
+        self._meta = previous["meta"] if previous else None
+        self._artifacts: Artifacts | None = None
+
+    def _folder(self, name: str) -> str:
+        if self._uri is None:
+            raise PyrunnerError(
+                "This transform has no previous build yet; check `exists` before using it."
+            )
+        return f"{self._uri}/{name}"
+
+    @property
+    def data(self) -> pl.LazyFrame | pd.DataFrame:
+        """The previous dataset."""
+        return _read_dataset(self._folder(DATASET_FOLDER_NAME), _draft_read_limit())
+
+    @property
+    def artifacts(self) -> Artifacts:
+        """The artifacts of the previous build."""
+        if self._artifacts is None:
+            self._artifacts = Artifacts(self._folder("artifacts"))
+        return self._artifacts
+
+    @property
+    def ds_meta(self) -> DSMeta:
+        """Row count, schema and the other metadata of the previous dataset."""
+        self._folder("")
+        return DSMeta(self._transform_id, self._meta)
+
+    def append(self, frame: pl.LazyFrame | pl.DataFrame) -> Append:
+        """Return this from the transform to keep the files of the previous dataset as they are and add
+        the frame's rows as new files. The previous rows are neither read nor written again, so the build
+        only costs what the new rows cost. The frame must have the columns and types of the previous
+        dataset. On the first build the frame is the dataset."""
+        return Append(frame)
+
+
+class Storage:
+    """Direct access to the S3 folder of the running build, for what the rest of the API does not cover."""
+
+    @property
+    def uri(self) -> str:
+        """The build's folder, ``s3://bucket/builds/<build id>``."""
+        return os.environ["DS_BUILD_URI"]
+
+    @property
+    def options(self) -> dict[str, str]:
+        """Polars storage options with the build's temporary credentials: they write the build's own
+        folder and read its previous build."""
+        return _storage_options()
+
+    def filesystem(self) -> pafs.S3FileSystem:
+        """A pyarrow filesystem with the same credentials; its paths are the uri without ``s3://``."""
+        return _s3_filesystem(_storage_options())
+
+
+class Build:
+    """The running build: ``from pyrunner_lib import build``."""
+
+    storage = Storage()
+
+    @property
+    def id(self) -> str:
+        return os.environ["DS_BUILD_ID"]
+
+    @property
+    def transform_id(self) -> str:
+        return os.environ["TRANSFORM_ID"]
+
+    @property
+    def branch(self) -> str:
+        return os.environ["DS_BRANCH"]
+
+    @property
+    def is_draft(self) -> bool:
+        """True for a build of code that is not committed; it reads only the first rows of its inputs."""
+        return os.environ.get("IS_DRAFT_BUILD", "").lower() == "true"
+
+    @property
+    def artifacts(self) -> Path:
+        """The local folder for the build's artifacts. What is in it when the transform ends is stored
+        with the build, also after a failure."""
+        folder = Path(os.environ["ARTIFACT_FOLDER"])
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+
+build = Build()
+
+
 # JSON Schema Models
 class Config(BaseModel):
     python: str
@@ -218,6 +408,16 @@ CONNECTIONS_FILE = "_connections.json"
 CONNECTIONS: list[Connection] | None = None
 DF_TYPE: str | None = None
 DEFAULT_DRAFT_READ_LIMIT = 1_000_000
+# A dataset is every Parquet file below the datasets folder of a build: one file or many, also in subfolders
+DATASET_FOLDER_NAME = "datasets"
+DATASET_GLOB = "**/*.parquet"
+# The rows of each append are written into a folder of their own below the dataset folder
+APPEND_FOLDER_PREFIX = "append-"
+# The storage answers a copy only when it is done, and pyarrow gives up on a silent request after 3 seconds,
+# which a file of about 1 GiB already takes. An hour covers a single file of several hundred GiB.
+COPY_REQUEST_TIMEOUT_SECONDS = 3600
+# An output is split into files of about this size, measured as the size of the data in memory
+DATASET_PART_BYTES = 1024**3
 NO_DRAFT_READ_LIMIT = -1
 DS_META_DATA: dict[str, dict[str, Any]] | None = None
 
@@ -269,10 +469,11 @@ def write_column_trace_file(
         # S3 build folders are named after the build, so the scan paths do not name the
         # transform: the inputs', and this transform's own previous dataset
         source_names = {
-            f"{build_folder(rid)}/datasets/data.parquet": rid for rid in _s3_inputs()
+            f"{build_folder(rid)}/{DATASET_FOLDER_NAME}/": rid for rid in _s3_inputs()
         }
-        if os.environ.get("DS_BUILD_URI") and os.environ.get("PREVIOUS_DATASET_PATH"):
-            source_names[os.environ["PREVIOUS_DATASET_PATH"]] = transform_id
+        if os.environ.get("DS_BUILD_URI") and os.environ.get("DS_PREVIOUS"):
+            previous = json.loads(os.environ["DS_PREVIOUS"])["uri"]
+            source_names[f"{previous}/{DATASET_FOLDER_NAME}/"] = transform_id
         origins = trace_lazyframe_sources(lf, source_names, storage_options)
 
         # On S3 builds meta is written to the local META_FOLDER and uploaded later.
@@ -291,36 +492,41 @@ def write_column_trace_file(
 
 def write_df_to_parquet(
     df: DataFrame,
-    file_path: str,
+    dataset_folder: str,
     transform_id: str,
     base_path: str,
+    traced: pl.LazyFrame | None = None,
 ) -> None:
     """
-    Writes a DataFrame to a Parquet file with automatic type detection.
+    Writes a DataFrame as the Parquet files of a dataset folder.
 
     Args:
         df: Can be a Polars DataFrame, Polars LazyFrame, or Pandas DataFrame
-        file_path: Path where to save the parquet file
+        dataset_folder: Folder that receives the dataset's Parquet files
         transform_id: ID of the transform for tracing
         base_path: Base path for the project
+        traced: The query the column lineage is read from when it is not df itself
     """
     try:
         storage_options = output_storage_options()
         if storage_options is None:
-            # Create directories if they don't exist
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            # A local folder is written again by every run, and files of an earlier run would be read as
+            # part of the dataset. A build folder in S3 is new.
+            shutil.rmtree(dataset_folder, ignore_errors=True)
+            os.makedirs(dataset_folder)
 
-        # Check dataframe type and handle accordingly
         if isinstance(df, pl.LazyFrame):
-            # If it's a LazyFrame, collect it first
-            write_column_trace_file(df, transform_id, base_path)
-            df.sink_parquet(file_path, storage_options=storage_options)
-        elif isinstance(df, pl.DataFrame):
-            # If it's a Polars DataFrame, write directly
-            df.write_parquet(file_path, storage_options=storage_options)
+            write_column_trace_file(traced if traced is not None else df, transform_id, base_path)
+        if isinstance(df, pl.LazyFrame | pl.DataFrame):
+            # Polars splits the output into files and streams them out, so no file grows without bound
+            df.lazy().sink_parquet(
+                pl.PartitionBy(dataset_folder, approximate_bytes_per_file=DATASET_PART_BYTES),
+                storage_options=storage_options,
+            )
         elif isinstance(df, pd.DataFrame):
-            # If it's a Pandas DataFrame, use pyarrow
+            # A pandas DataFrame is in memory as a whole, so it is written as one file
             table = pa.Table.from_pandas(df, preserve_index=False)
+            file_path = f"{dataset_folder}/00000000.parquet"
             if storage_options is None:
                 pq.write_table(table, file_path)
             else:
@@ -334,6 +540,55 @@ def write_df_to_parquet(
 
     except Exception as e:
         raise DataWriteError(f"Failed to write Parquet file: {e}") from e
+
+
+def write_append(
+    frame: pl.LazyFrame | pl.DataFrame,
+    previous: Previous,
+    dataset_folder: str,
+    transform_id: str,
+    base_path: str,
+) -> None:
+    """Writes a dataset as the files of the previous dataset plus the frame's rows as new files."""
+    if not previous.exists:
+        write_df_to_parquet(frame, dataset_folder, transform_id, base_path)
+        return
+
+    previous_folder = previous._folder(DATASET_FOLDER_NAME)
+    previous_data = pl.scan_parquet(
+        f"{previous_folder}/{DATASET_GLOB}", storage_options=storage_options(previous_folder)
+    )
+    previous_schema, schema = previous_data.collect_schema(), frame.lazy().collect_schema()
+    if schema != previous_schema:
+        raise DataWriteError(
+            "The appended rows must have the columns and types of the previous dataset.\n"
+            f"Previous dataset: {dict(previous_schema)}\nAppended rows: {dict(schema)}"
+        )
+
+    try:
+        # The previous files are copied as they are; in S3 the storage copies them, they do not pass
+        # through the build
+        source_fs, source = _filesystem(previous_folder)
+        files = _dataset_files(previous_folder)
+        if isinstance(source_fs, pafs.LocalFileSystem):
+            shutil.rmtree(dataset_folder, ignore_errors=True)
+            target_fs, target = source_fs, dataset_folder
+        else:
+            target_fs = _s3_filesystem(_storage_options(), COPY_REQUEST_TIMEOUT_SECONDS)
+            target = dataset_folder.removeprefix("s3://")
+        for file in files:
+            if isinstance(target_fs, pafs.LocalFileSystem):
+                os.makedirs(os.path.dirname(f"{target}/{file}"), exist_ok=True)
+            target_fs.copy_file(f"{source}/{file}", f"{target}/{file}")
+    except Exception as e:
+        raise DataWriteError(f"Failed to copy the previous dataset: {e}") from e
+
+    # Each append gets the next folder, so the files keep the order in which they were added
+    appends = {file.split("/")[0] for file in files if file.startswith(APPEND_FOLDER_PREFIX)}
+    append_folder = f"{dataset_folder}/{APPEND_FOLDER_PREFIX}{len(appends) + 1:06d}"
+    # The lineage of the whole dataset: its columns come from the frame and from the dataset itself
+    traced = pl.concat([previous_data, frame]) if isinstance(frame, pl.LazyFrame) else None
+    write_df_to_parquet(frame, append_folder, transform_id, base_path, traced)
 
 
 def path_to_name(path: str) -> str:
@@ -420,6 +675,18 @@ def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform
     )
 
 
+def _is_previous(annotation: Any) -> bool:
+    """Whether a parameter annotation asks for the previous build: Previous, or Previous in a union."""
+    if isinstance(annotation, str):
+        # from __future__ import annotations keeps the annotation as its source text
+        return any(
+            (isinstance(node, ast.Name) and node.id == "Previous")
+            or (isinstance(node, ast.Attribute) and node.attr == "Previous")
+            for node in ast.walk(ast.parse(annotation, mode="eval"))
+        )
+    return annotation is Previous or Previous in typing.get_args(annotation)
+
+
 def _execute_transform(transform_id: str, base_path: str = "") -> None:
     """Internal function to execute the transformation process."""
     try:
@@ -498,6 +765,8 @@ def _run_transform(transform_id: str, base_path: str) -> None:
     metadata: dict[str, Any] = getattr(main_func, "_pyrunner_metadata", {})
     param_mapping: dict[str, str] = {}  # parameter_name -> RID or legacy_name
     explicit_params: set[str] = set()
+    previous = Previous(transform_id)
+    previous_params: list[str] = []
 
     for name, param in params.items():
         # Skip *args and **kwargs
@@ -505,6 +774,11 @@ def _run_transform(transform_id: str, base_path: str) -> None:
             inspect.Parameter.VAR_POSITIONAL,
             inspect.Parameter.VAR_KEYWORD,
         ):
+            continue
+
+        # The transform's own previous build is no input dataset
+        if _is_previous(param.annotation):
+            previous_params.append(name)
             continue
 
         # Check decorator metadata first
@@ -536,7 +810,7 @@ def _run_transform(transform_id: str, base_path: str) -> None:
     )
 
     # Execute transformation
-    transform_result = main_func(**data_dict)
+    transform_result = main_func(**data_dict, **dict.fromkeys(previous_params, previous))
 
     # Handle optional health_checks return
     if isinstance(transform_result, tuple) and len(transform_result) == 2:
@@ -546,31 +820,59 @@ def _run_transform(transform_id: str, base_path: str) -> None:
         health_checks = None
 
     # Write output
-    output_path = f"{build_folder(transform_conn.id, base_path)}/datasets/data.parquet"
-    write_df_to_parquet(result, output_path, transform_conn.id, base_path)
+    output_folder = f"{build_folder(transform_conn.id, base_path)}/{DATASET_FOLDER_NAME}"
+    if isinstance(result, Append):
+        write_append(result.frame, previous, output_folder, transform_conn.id, base_path)
+    else:
+        write_df_to_parquet(result, output_folder, transform_conn.id, base_path)
     print(f"Execution Time: {time.perf_counter() - start_time:.2f} sec")
 
     # Checks run on the written file: re-running the transform for every check is
     # slower, and its row order may differ from the file's
     if health_checks:
         checks_start = time.perf_counter()
-        run_health_checks(output_path, health_checks, output_storage_options())
+        run_health_checks(
+            f"{output_folder}/{DATASET_GLOB}", health_checks, output_storage_options()
+        )
         print(f"Health Check Time: {time.perf_counter() - checks_start:.2f} sec")
 
 
-def _read_parquet_head(
-    file_path: str, limit: int, filesystem: pafs.FileSystem | None
-) -> pd.DataFrame:
-    """The first `limit` rows as pandas, read batch by batch instead of loading the whole file."""
-    parquet = pq.ParquetFile(file_path, filesystem=filesystem)
-    batches = []
-    remaining = limit
-    for batch in parquet.iter_batches(batch_size=min(limit, 65_536)):
-        batches.append(batch.slice(0, remaining))
-        remaining -= batches[-1].num_rows
-        if remaining == 0:
-            break
-    return pa.Table.from_batches(batches, schema=parquet.schema_arrow).to_pandas()
+def _draft_read_limit() -> int | None:
+    """How many rows a draft build reads of each dataset; None for all of them, as in every other build.
+    A workspace can change the number, or turn the limit off with -1 (_config.json draftReadLimit)."""
+    if os.environ.get("IS_DRAFT_BUILD", "").lower() != "true":
+        return None
+    raw_limit = os.environ.get("DRAFT_READ_LIMIT", str(DEFAULT_DRAFT_READ_LIMIT))
+    try:
+        limit = int(raw_limit)
+    except ValueError as e:
+        raise ConfigurationError(
+            f"DRAFT_READ_LIMIT must be a whole number of rows, got {raw_limit!r}."
+        ) from e
+    if limit == NO_DRAFT_READ_LIMIT:
+        return None
+    # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far
+    if limit < 1:
+        raise ConfigurationError(
+            f"DRAFT_READ_LIMIT must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {limit}."
+        )
+    return limit
+
+
+def _read_dataset(dataset_folder: str, read_limit: int | None) -> pl.LazyFrame | pd.DataFrame:
+    """The dataset of a folder as the workspace's dataframe type; with a limit only its first rows."""
+    options = storage_options(dataset_folder)
+    if DF_TYPE == "polars":
+        frame = pl.scan_parquet(f"{dataset_folder}/{DATASET_GLOB}", storage_options=options)
+        return frame.head(read_limit) if read_limit is not None else frame  # lazy: only these rows are read
+
+    fs, folder = _filesystem(dataset_folder)
+    files = [f"{folder}/{file}" for file in _dataset_files(dataset_folder)]
+    if not files:
+        raise FileNotFoundError(f"There is no Parquet file below {dataset_folder}")
+    dataset = pads.dataset(files, format="parquet", filesystem=fs)
+    table = dataset.head(read_limit) if read_limit is not None else dataset.to_table()
+    return table.to_pandas()
 
 
 def read_parquet_files(
@@ -592,24 +894,7 @@ def read_parquet_files(
     conn_by_id = {conn.id: conn for conn in connections.values()}
     conn_by_name = connections  # Already keyed by path stem
 
-    # A draft build reads only the first rows of each input; a workspace can change how many, or turn the limit off
-    # with -1 (_config.json draftReadLimit)
-    draft_read_limit = None
-    if os.environ.get("IS_DRAFT_BUILD", "").lower() == "true":
-        raw_limit = os.environ.get("DRAFT_READ_LIMIT", str(DEFAULT_DRAFT_READ_LIMIT))
-        try:
-            draft_read_limit = int(raw_limit)
-        except ValueError as e:
-            raise ConfigurationError(
-                f"DRAFT_READ_LIMIT must be a whole number of rows, got {raw_limit!r}."
-            ) from e
-    if draft_read_limit == NO_DRAFT_READ_LIMIT:
-        draft_read_limit = None
-    # pandas reads head(-n) as "all but the last n rows", so any other non-positive limit must not get that far
-    elif draft_read_limit is not None and draft_read_limit < 1:
-        raise ConfigurationError(
-            f"DRAFT_READ_LIMIT must be a positive number of rows or {NO_DRAFT_READ_LIMIT} for no limit, got {draft_read_limit}."
-        )
+    draft_read_limit = _draft_read_limit()
 
     for param_name, mapping_key in param_mapping.items():
         # Try finding by ID first (RID), then by name
@@ -626,36 +911,24 @@ def read_parquet_files(
         else:
             rid = conn.id
 
-        file_path = f"{build_folder(rid, base_path)}/datasets/data.parquet"
+        dataset_folder = f"{build_folder(rid, base_path)}/{DATASET_FOLDER_NAME}"
         storage_options = input_storage_options(rid)
         try:
             if os.environ.get("DS_BUILD_URI") and storage_options is None:
                 raise DataLoadError(
                     f"No access to the data of '{rid}'; is it an input of this transform?"
                 )
-            df: pl.LazyFrame | pd.DataFrame
-            if DF_TYPE == "polars":
-                df = pl.scan_parquet(file_path, storage_options=storage_options)
-                if draft_read_limit is not None:
-                    df = df.head(draft_read_limit)  # lazy: only these rows are ever read
-            else:
-                # pyarrow takes the S3 path without its scheme, together with the filesystem
-                filesystem = _s3_filesystem(storage_options) if storage_options else None
-                pandas_path = file_path.removeprefix("s3://")
-                if draft_read_limit is not None:
-                    df = _read_parquet_head(pandas_path, draft_read_limit, filesystem)
-                else:
-                    df = pd.read_parquet(pandas_path, engine="pyarrow", filesystem=filesystem)
+            df = _read_dataset(dataset_folder, draft_read_limit)
 
-            # Inject ds_meta attribute into the dataframe
+            # An input is its dataset with its metadata and its artifacts
             if transform_id is not None:
-                # Get DS_META data for this RID (data snapshot)
                 ds_meta_data = DS_META_DATA.get(rid) if DS_META_DATA else None
-                df.ds_meta = DSMeta(rid, base_path, ds_meta_data)  # type: ignore[union-attr]
+                df.ds_meta = DSMeta(rid, ds_meta_data)  # type: ignore[union-attr]
+                df.artifacts = Artifacts(f"{build_folder(rid, base_path)}/artifacts")  # type: ignore[union-attr]
 
             data_dict[param_name] = df
         except Exception as e:
             raise DataLoadError(
-                f"Failed to load {param_name}. Ensure the input dataset exists at {file_path}: {e}"
+                f"Failed to load {param_name}. Ensure the input dataset exists at {dataset_folder}: {e}"
             ) from e
     return data_dict
