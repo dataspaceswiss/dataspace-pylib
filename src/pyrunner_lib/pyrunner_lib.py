@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -14,6 +15,7 @@ from typing import Any, TypeAlias, TypeVar
 import pandas as pd  # type: ignore[import-untyped]
 import polars as pl
 import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.fs as pafs  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
 
@@ -66,7 +68,9 @@ class DSMeta:
         self, rid: str, base_path: str, ds_meta_data: dict[str, Any] | None = None
     ):
         self.transform_id = rid
-        self.artifact_dir = f"{base_path}/data/{rid}/artifacts"
+        self.artifact_dir = f"{build_folder(rid, base_path)}/artifacts"
+        # Needed to read artifact_dir when it is an s3:// path; None for local paths.
+        self.storage_options = input_storage_options(rid)
 
         # Every field is None when DS_META has nothing for this dataset
         ds_meta_data = ds_meta_data or {}
@@ -78,6 +82,101 @@ class DSMeta:
         self.schema = ds_meta_data.get("Schema")
         self.creation_date = ds_meta_data.get("CreationDate")
         self.columns = self.schema["Columns"] if self.schema and "Columns" in self.schema else []
+
+
+# Storage
+#
+# On DataSpace, builds read and write S3 (DS_BUILD_URI is set): the build's own folder with
+# the credentials in the DS_S3_* variables, and each input build folder with the credentials
+# in DS_INPUTS. Artifacts and meta are written to local folders and uploaded at the end.
+# Without DS_BUILD_URI, everything lives below base_path/data/<transform id>/.
+#
+# The variables are not the AWS_* ones on purpose: those would also point the AWS clients
+# of a transform's own code to the DataSpace storage.
+
+
+def _s3_inputs() -> dict[str, dict[str, str]]:
+    return json.loads(os.environ.get("DS_INPUTS") or "{}")
+
+
+def _storage_options(credentials: dict[str, str] | None = None) -> dict[str, str]:
+    """Polars storage options for the build's own folder, or for given input credentials."""
+    if credentials is None:
+        credentials = {
+            "accessKeyId": os.environ["DS_S3_ACCESS_KEY_ID"],
+            "secretAccessKey": os.environ["DS_S3_SECRET_ACCESS_KEY"],
+            "sessionToken": os.environ["DS_S3_SESSION_TOKEN"],
+        }
+    endpoint = os.environ["DS_S3_ENDPOINT"]
+    return {
+        "aws_endpoint_url": endpoint,
+        "aws_region": os.environ["DS_S3_REGION"],
+        "aws_allow_http": str(endpoint.startswith("http://")).lower(),
+        "aws_access_key_id": credentials["accessKeyId"],
+        "aws_secret_access_key": credentials["secretAccessKey"],
+        "aws_session_token": credentials["sessionToken"],
+    }
+
+
+def _s3_filesystem(storage_options: dict[str, str]) -> pafs.S3FileSystem:
+    return pafs.S3FileSystem(
+        access_key=storage_options["aws_access_key_id"],
+        secret_key=storage_options["aws_secret_access_key"],
+        session_token=storage_options["aws_session_token"],
+        endpoint_override=storage_options["aws_endpoint_url"],
+        region=storage_options["aws_region"],
+        allow_bucket_creation=False,
+        check_directory_existence_before_creation=False,
+    )
+
+
+def build_folder(rid: str, base_path: str = "") -> str:
+    """Folder of the build of a transform: this build's or an input's."""
+    inputs = _s3_inputs()
+    if rid in inputs:
+        return inputs[rid]["uri"]
+    if os.environ.get("DS_BUILD_URI") and rid == os.environ.get("TRANSFORM_ID"):
+        return os.environ["DS_BUILD_URI"]
+    return f"{base_path}/data/{rid}"
+
+
+def storage_options(path: str) -> dict[str, str] | None:
+    """Storage options to access an s3:// path of this build, its previous build or an input,
+    for example a folder below ``ds_meta.artifact_dir``. None for local paths."""
+    if not path.startswith("s3://"):
+        return None
+    for credentials in _s3_inputs().values():
+        if path == credentials["uri"] or path.startswith(credentials["uri"] + "/"):
+            return _storage_options(credentials)
+    return _storage_options()
+
+
+def input_storage_options(rid: str) -> dict[str, str] | None:
+    """Storage options to read an input's build folder; None for local folders."""
+    inputs = _s3_inputs()
+    return _storage_options(inputs[rid]) if rid in inputs else None
+
+
+def output_storage_options() -> dict[str, str] | None:
+    """Storage options to write this build's folder; None for local folders."""
+    return _storage_options() if os.environ.get("DS_BUILD_URI") else None
+
+
+def upload_build_folders() -> None:
+    """Upload the local artifact and meta folders to this build's S3 folder."""
+    build_uri = os.environ.get("DS_BUILD_URI")
+    if not build_uri:
+        return
+    fs = _s3_filesystem(_storage_options())
+    for variable, name in (("ARTIFACT_FOLDER", "artifacts"), ("META_FOLDER", "meta")):
+        local_folder = os.environ[variable]
+        for root, _, files in os.walk(local_folder):
+            for file_name in files:
+                local_path = os.path.join(root, file_name)
+                relative = os.path.relpath(local_path, local_folder).replace(os.sep, "/")
+                target = f"{build_uri.removeprefix('s3://')}/{name}/{relative}"
+                with open(local_path, "rb") as src, fs.open_output_stream(target) as dst:
+                    shutil.copyfileobj(src, dst)
 
 
 # JSON Schema Models
@@ -167,9 +266,21 @@ def write_column_trace_file(
 ) -> None:
     """Write column trace file with proper error handling."""
     try:
-        origins = trace_lazyframe_sources(lf)
+        # S3 build folders are named after the build, so the scan paths do not name the
+        # transform: the inputs', and this transform's own previous dataset
+        source_names = {
+            f"{build_folder(rid)}/datasets/data.parquet": rid for rid in _s3_inputs()
+        }
+        if os.environ.get("DS_BUILD_URI") and os.environ.get("PREVIOUS_DATASET_PATH"):
+            source_names[os.environ["PREVIOUS_DATASET_PATH"]] = transform_id
+        origins = trace_lazyframe_sources(lf, source_names, storage_options)
 
-        trace_file_path = f"{base_path}/data/{transform_id}/meta/columns.json"
+        # On S3 builds meta is written to the local META_FOLDER and uploaded later.
+        if os.environ.get("DS_BUILD_URI"):
+            meta_folder = os.environ["META_FOLDER"]
+        else:
+            meta_folder = f"{base_path}/data/{transform_id}/meta"
+        trace_file_path = f"{meta_folder}/columns.json"
         os.makedirs(os.path.dirname(trace_file_path), exist_ok=True)
         with open(trace_file_path, "w", encoding="utf-8") as f:
             json.dump(origins, f, indent=4)
@@ -194,21 +305,30 @@ def write_df_to_parquet(
         base_path: Base path for the project
     """
     try:
-        # Create directories if they don't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        storage_options = output_storage_options()
+        if storage_options is None:
+            # Create directories if they don't exist
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
         # Check dataframe type and handle accordingly
         if isinstance(df, pl.LazyFrame):
             # If it's a LazyFrame, collect it first
             write_column_trace_file(df, transform_id, base_path)
-            df.sink_parquet(file_path)
+            df.sink_parquet(file_path, storage_options=storage_options)
         elif isinstance(df, pl.DataFrame):
             # If it's a Polars DataFrame, write directly
-            df.write_parquet(file_path)
+            df.write_parquet(file_path, storage_options=storage_options)
         elif isinstance(df, pd.DataFrame):
             # If it's a Pandas DataFrame, use pyarrow
             table = pa.Table.from_pandas(df, preserve_index=False)
-            pq.write_table(table, file_path)
+            if storage_options is None:
+                pq.write_table(table, file_path)
+            else:
+                pq.write_table(
+                    table,
+                    file_path.removeprefix("s3://"),
+                    filesystem=_s3_filesystem(storage_options),
+                )
         else:
             raise TypeError(f"Unsupported dataframe type: {type(df)}")
 
@@ -302,6 +422,28 @@ def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform
 
 def _execute_transform(transform_id: str, base_path: str = "") -> None:
     """Internal function to execute the transformation process."""
+    try:
+        _run_transform(transform_id, base_path)
+    except BaseException:
+        # Keep the artifacts and health report of failed builds for debugging.
+        try:
+            upload_build_folders()
+        except Exception as e:  # noqa: BLE001 - the build error is the one to report
+            print(f"Failed to upload artifacts: {e}", file=sys.stderr)
+        raise
+
+    try:
+        upload_start = time.perf_counter()
+        upload_build_folders()
+    except Exception as e:
+        raise DataWriteError(f"Failed to upload artifacts: {e}") from e
+    if os.environ.get("DS_BUILD_URI"):
+        print(f"Upload Time: {time.perf_counter() - upload_start:.2f} sec")
+
+    print("--------- Build successful ---------")
+
+
+def _run_transform(transform_id: str, base_path: str) -> None:
     # Load configuration and DS_META data
     load_configuration()
     load_ds_meta()
@@ -404,7 +546,7 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
         health_checks = None
 
     # Write output
-    output_path = f"{base_path}/data/{transform_conn.id}/datasets/data.parquet"
+    output_path = f"{build_folder(transform_conn.id, base_path)}/datasets/data.parquet"
     write_df_to_parquet(result, output_path, transform_conn.id, base_path)
     print(f"Execution Time: {time.perf_counter() - start_time:.2f} sec")
 
@@ -412,15 +554,15 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
     # slower, and its row order may differ from the file's
     if health_checks:
         checks_start = time.perf_counter()
-        run_health_checks(output_path, health_checks)
+        run_health_checks(output_path, health_checks, output_storage_options())
         print(f"Health Check Time: {time.perf_counter() - checks_start:.2f} sec")
 
-    print("--------- Build successful ---------")
 
-
-def _read_parquet_head(file_path: str, limit: int) -> pd.DataFrame:
+def _read_parquet_head(
+    file_path: str, limit: int, filesystem: pafs.FileSystem | None
+) -> pd.DataFrame:
     """The first `limit` rows as pandas, read batch by batch instead of loading the whole file."""
-    parquet = pq.ParquetFile(file_path)
+    parquet = pq.ParquetFile(file_path, filesystem=filesystem)
     batches = []
     remaining = limit
     for batch in parquet.iter_batches(batch_size=min(limit, 65_536)):
@@ -484,17 +626,26 @@ def read_parquet_files(
         else:
             rid = conn.id
 
-        file_path = f"{base_path}/data/{rid}/datasets/data.parquet"
+        file_path = f"{build_folder(rid, base_path)}/datasets/data.parquet"
+        storage_options = input_storage_options(rid)
         try:
+            if os.environ.get("DS_BUILD_URI") and storage_options is None:
+                raise DataLoadError(
+                    f"No access to the data of '{rid}'; is it an input of this transform?"
+                )
             df: pl.LazyFrame | pd.DataFrame
             if DF_TYPE == "polars":
-                df = pl.scan_parquet(file_path)
+                df = pl.scan_parquet(file_path, storage_options=storage_options)
                 if draft_read_limit is not None:
                     df = df.head(draft_read_limit)  # lazy: only these rows are ever read
-            elif draft_read_limit is not None:
-                df = _read_parquet_head(file_path, draft_read_limit)
             else:
-                df = pd.read_parquet(file_path, engine="pyarrow")
+                # pyarrow takes the S3 path without its scheme, together with the filesystem
+                filesystem = _s3_filesystem(storage_options) if storage_options else None
+                pandas_path = file_path.removeprefix("s3://")
+                if draft_read_limit is not None:
+                    df = _read_parquet_head(pandas_path, draft_read_limit, filesystem)
+                else:
+                    df = pd.read_parquet(pandas_path, engine="pyarrow", filesystem=filesystem)
 
             # Inject ds_meta attribute into the dataframe
             if transform_id is not None:

@@ -101,7 +101,7 @@ A formatter or lint configuration in the repository, the project's own conventio
   "dfType": "polars",
   "packages": [
     "plotly",
-    "git+https://github.com/dataspaceswiss/pyrunner-lib@v0.6.2#egg=pyrunner-lib"
+    "git+https://github.com/dataspaceswiss/pyrunner-lib@v0.7.0-beta#egg=pyrunner-lib"
   ]
 }
 ```
@@ -187,25 +187,26 @@ pyrunner_lib.main()
 
 ## Injected environment
 
-Use the exact paths injected by DataSpace.
+Use the exact paths injected by DataSpace. Build data lives in S3; `ARTIFACT_FOLDER` and `META_FOLDER` are local directories whose contents the runner uploads to S3 when the transform finishes, also when it fails.
 
 | Variable | Meaning |
 | --- | --- |
 | `TRANSFORM_ID` | Current transform RID. |
-| `ARTIFACT_FOLDER` | Directory for persisted artifacts from the current build. |
-| `META_FOLDER` | Directory for generated metadata such as health reports. |
-| `DATASET_FOLDER` | Directory populated with the returned dataframe's parquet dataset. |
-| `PREVIOUS_BUILD_FOLDER` | Previous build directory for the current transform. |
-| `PREVIOUS_DATASET_PATH` | Previous generated dataset file path. |
-| `PREVIOUS_ARTIFACT_FOLDER` | Previous build's artifact directory. |
+| `ARTIFACT_FOLDER` | Local directory for persisted artifacts from the current build. |
+| `META_FOLDER` | Local directory for generated metadata such as health reports. |
+| `DATASET_FOLDER` | `s3://` folder that receives the returned dataframe's parquet dataset. |
+| `PREVIOUS_BUILD_FOLDER` | `s3://` folder of the previous build of the current transform. |
+| `PREVIOUS_DATASET_PATH` | `s3://` path of the previous generated dataset. |
+| `PREVIOUS_ARTIFACT_FOLDER` | `s3://` folder of the previous build's artifacts. |
+| `DS_BUILD_URI`, `DS_INPUTS`, `DS_S3_*` | Where the build's data lives in S3 and the temporary credentials for it; use `storage_options(path)` instead of reading them. |
 | `DS_META` | JSON with the metadata of every input; read it through `ds_meta` instead. |
 | `IS_DRAFT_BUILD` | `true` for a draft build. |
 | `DRAFT_READ_LIMIT` | Rows a draft build reads from each input (`-1`: all), when `_config.json` sets `draftReadLimit`. |
 | One variable per workspace secret | Named by the secret's key in the workspace settings. |
 
-The `PREVIOUS_*` variables are set only when the transform has an earlier successful, non-draft build on the same branch. That build's data can have expired under the retention policy, so check that the file exists before reading it.
+The `PREVIOUS_*` variables are set only when the transform has an earlier successful, non-draft build on the same branch.
 
-Files outside the transform build directory are ephemeral and are not persisted.
+An `s3://` path needs credentials: `storage_options(path)` from `pyrunner_lib` returns them for any path the build may access (and `None` for a local path), so `pl.scan_parquet(path, storage_options=storage_options(path))` works on DataSpace and locally. The build can write its own folder and read its previous build and its inputs, nothing else; read inputs through the transform parameters. The credentials are not in the `AWS_*` variables, so a transform's own AWS clients are unaffected. Files outside `ARTIFACT_FOLDER` and `META_FOLDER` are ephemeral and are not persisted.
 
 ## Draft builds
 
@@ -215,10 +216,24 @@ A build of code that is not committed yet is a draft. Each input is cut to its f
 
 Input dataframes expose `ds_meta`. Available metadata includes the upstream transform ID, data snapshot ID, build ID, row and column counts, file size, creation date, columns, and artifact directory.
 
+On DataSpace the artifact directory is an `s3://` folder, readable with `ds_meta.storage_options`, the read-only credentials for that input (the same that `storage_options(path)` returns for a path below it). Polars takes them directly, for example `pl.scan_csv(f"{artifact_dir}/summary.csv", storage_options=options)`; other libraries need a filesystem:
+
 ```python
+import pyarrow.fs as pafs
+
+
 def transform(upstream_data):
-    upstream_artifacts = upstream_data.ds_meta.artifact_dir
-    # Read the required upstream artifact from upstream_artifacts.
+    options = upstream_data.ds_meta.storage_options
+    fs = pafs.S3FileSystem(
+        access_key=options["aws_access_key_id"],
+        secret_key=options["aws_secret_access_key"],
+        session_token=options["aws_session_token"],
+        endpoint_override=options["aws_endpoint_url"],
+        region=options["aws_region"],
+    )
+    artifact_dir = upstream_data.ds_meta.artifact_dir.removeprefix("s3://")
+    with fs.open_input_stream(f"{artifact_dir}/summary.json") as f:
+        summary = f.read()
     return upstream_data
 ```
 
@@ -258,20 +273,21 @@ Return health checks alongside the dataframe as `(dataframe, checks)`. Read [hea
 
 ## Incremental builds
 
-Read `PREVIOUS_DATASET_PATH` only when it is present and points to an existing file.
+Read `PREVIOUS_DATASET_PATH` only when it is present. It is an `s3://` path, so do not check it with `os.path`.
 
 ```python
 import os
 
 import polars as pl
+from pyrunner_lib import storage_options
 
 
 def transform(new_data: pl.LazyFrame) -> pl.LazyFrame:
     previous_path = os.environ.get("PREVIOUS_DATASET_PATH")
-    if not previous_path or not os.path.isfile(previous_path):
+    if not previous_path:
         return new_data
 
-    previous_data = pl.scan_parquet(previous_path)
+    previous_data = pl.scan_parquet(previous_path, storage_options=storage_options(previous_path))
     return pl.concat([previous_data, new_data]).unique()
 ```
 
@@ -291,7 +307,7 @@ Example:
 uv run __main__.py rid.transform.12345-example-uuid .
 ```
 
-The runner reads each input from `<BASE_PATH>/data/<input RID>/datasets/data.parquet` and writes the output to `<BASE_PATH>/data/<RID>/datasets/data.parquet`, with column lineage in `<BASE_PATH>/data/<RID>/meta/columns.json`. On the platform the base path is empty, so these are the `/data/...` paths the environment variables name.
+The runner reads each input from `<BASE_PATH>/data/<input RID>/datasets/data.parquet` and writes the output to `<BASE_PATH>/data/<RID>/datasets/data.parquet`, with column lineage in `<BASE_PATH>/data/<RID>/meta/columns.json`. On the platform the inputs and the output are `s3://` build folders instead, and lineage is written to `META_FOLDER`.
 
 Locally, provide the input files and set the environment variables the transform reads, pointing into the same tree, for example `ARTIFACT_FOLDER=./data/<RID>/artifacts`. `META_FOLDER` is required as soon as the transform returns health checks. Set workspace secrets the code needs, and `PREVIOUS_*` only to test an incremental run.
 

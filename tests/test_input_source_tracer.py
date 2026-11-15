@@ -23,6 +23,7 @@ class TestInputSourceTracer:
     def _create_minimal_tracer(self):
         """Create a minimal tracer for testing without file operations."""
         tracer = InputSourceTracer.__new__(InputSourceTracer)
+        tracer._source_names = {}
         tracer.column_sources = {}
         return tracer
     
@@ -1194,6 +1195,7 @@ def test_unpivot_uses_default_output_names(sources):
 
 def test_plan_analysis_is_memoized_with_isolated_results(monkeypatch):
     tracer = InputSourceTracer.__new__(InputSourceTracer)
+    tracer._source_names = {}
     tracer._analysis_cache = {}
     analyzed_nodes = []
 
@@ -1350,6 +1352,7 @@ def test_non_lazyframe_is_rejected():
 
 def test_sources_keep_separator_characters_in_paths_and_names():
     tracer = InputSourceTracer.__new__(InputSourceTracer)
+    tracer._source_names = {}
     tracer.column_sources = {"out": {("/tmp/a|b.parquet", "so|urce")}}
     assert tracer.get_column_sources() == {
         "out": [{"dataset_rid": "/tmp/a|b.parquet", "column": "so|urce"}]

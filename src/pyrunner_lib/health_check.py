@@ -32,15 +32,18 @@ class HealthCheckFailure(Exception):
 
 
 def run_health_checks(
-    dataset_path: str, column_builders: Iterable[Check]
+    dataset_path: str,
+    column_builders: Iterable[Check],
+    storage_options: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
-    Run health checks on the written output at dataset_path.
+    Run health checks on the written output at dataset_path; storage_options are
+    needed when it is an s3:// path.
 
     Writes meta/health_report.json, then raises HealthCheckFailure if a
     fail-severity check failed.
     """
-    lf = pl.scan_parquet(dataset_path)
+    lf = pl.scan_parquet(dataset_path, storage_options=storage_options)
 
     column_checks: dict[str, list[CheckDefinition]] = {}
     for builder in column_builders:

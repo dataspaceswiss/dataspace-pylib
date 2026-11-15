@@ -22,6 +22,7 @@ from pyrunner_lib.pyrunner_lib import (
     load_module,
     path_to_name,
     read_parquet_files,
+    storage_options,
     transform,
     write_column_trace_file,
     write_df_to_parquet,
@@ -141,7 +142,7 @@ class TestWriteColumnTraceFile:
                 with open(trace_file) as f:
                     data = json.load(f)
                     assert data == {"a": ["source1"], "b": ["source2"]}
-                mock_trace.assert_called_once_with(df)
+                mock_trace.assert_called_once_with(df, {}, storage_options)
     
 
 class TestWriteDfToParquet:
@@ -490,3 +491,25 @@ def transform(input1):
                 with pytest.raises(ModuleLoadError, match="does not contain a 'transform' function"):
                     transform("test_transform", temp_dir)
 
+
+class TestStorageOptions:
+    def test_picks_the_credentials_of_the_folder(self, monkeypatch):
+        from pyrunner_lib import storage_options
+
+        monkeypatch.setenv("DS_S3_ENDPOINT", "http://storage:9000")
+        monkeypatch.setenv("DS_S3_REGION", "us-east-1")
+        monkeypatch.setenv("DS_S3_ACCESS_KEY_ID", "own-key")
+        monkeypatch.setenv("DS_S3_SECRET_ACCESS_KEY", "own-secret")
+        monkeypatch.setenv("DS_S3_SESSION_TOKEN", "own-token")
+        monkeypatch.setenv("DS_INPUTS", json.dumps({"rid.transform.in": {
+            "uri": "s3://dataspace/builds/rid.build.in",
+            "accessKeyId": "in-key", "secretAccessKey": "in-secret", "sessionToken": "in-token",
+        }}))
+
+        assert storage_options("/local/folder") is None
+        assert storage_options("s3://dataspace/builds/rid.build.own/x")["aws_allow_http"] == "true"
+        assert storage_options("s3://dataspace/builds/rid.build.in/artifacts/a.tsv")["aws_access_key_id"] == "in-key"
+        assert storage_options("s3://dataspace/builds/rid.build.in")["aws_access_key_id"] == "in-key"
+        # A build whose id merely starts with the input's id is not the input
+        assert storage_options("s3://dataspace/builds/rid.build.in2/x")["aws_access_key_id"] == "own-key"
+        assert storage_options("s3://dataspace/builds/rid.build.own/x")["aws_access_key_id"] == "own-key"

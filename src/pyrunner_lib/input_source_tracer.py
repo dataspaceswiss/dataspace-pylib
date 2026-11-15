@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -60,14 +60,19 @@ class _OpaqueNode:
 # ever needs splitting. dataset_rid is the transform whose dataset was read, or the file path for any other file.
 def _format_column_sources(
     column_sources: dict[str, set[_Source]],
+    source_names: dict[str, str],
 ) -> dict[str, list[dict[str, str]]]:
     results: dict[str, list[dict[str, str]]] = {}
     rid_pattern = re.compile(r"rid\.transform\.[a-f0-9a-zA-Z-]+")
     for column, sources in column_sources.items():
         formatted: set[_Source] = set()
         for file_path, source_column in sources:
-            match = rid_pattern.search(file_path)
-            formatted.add((match.group(0) if match else file_path, source_column))
+            if file_path in source_names:
+                dataset_rid = source_names[file_path]
+            else:
+                match = rid_pattern.search(file_path)
+                dataset_rid = match.group(0) if match else file_path
+            formatted.add((dataset_rid, source_column))
         if formatted:
             results[column] = [
                 {"dataset_rid": dataset_rid, "column": source_column}
@@ -101,9 +106,17 @@ class InputSourceTracer:
         "idx",
     )
 
-    def __init__(self, lazyframe: pl.LazyFrame):
+    def __init__(
+        self,
+        lazyframe: pl.LazyFrame,
+        source_names: dict[str, str] | None = None,
+        storage_options: Callable[[str], dict[str, str] | None] | None = None,
+    ):
         if not isinstance(lazyframe, pl.LazyFrame):
             raise TypeError("lazyframe must be a polars.LazyFrame")
+
+        self._source_names = source_names or {}
+        self._storage_options = storage_options
 
         # NodeTraverser is Polars' versioned plugin interface for optimized IR.
         # It is not public, so reject unknown major versions instead of guessing.
@@ -231,7 +244,16 @@ class InputSourceTracer:
         for path in node.paths:
             file_path = path.removeprefix("file://")
             try:
-                physical_columns = pl.read_parquet_schema(file_path)
+                storage_options = (
+                    self._storage_options(file_path) if self._storage_options else None
+                )
+                if storage_options:
+                    schema = pl.scan_parquet(
+                        file_path, storage_options=storage_options
+                    ).collect_schema()
+                    physical_columns = set(schema.names())
+                else:
+                    physical_columns = set(pl.read_parquet_schema(file_path))
             except Exception:  # noqa: BLE001, S112
                 continue
             for name in output_names:
@@ -500,11 +522,20 @@ class InputSourceTracer:
         return lineage
 
     def get_column_sources(self) -> dict[str, list[dict[str, str]]]:
-        return _format_column_sources(self.column_sources)
+        return _format_column_sources(self.column_sources, self._source_names)
 
 
 def trace_lazyframe_sources(
     lazyframe: pl.LazyFrame,
+    source_names: dict[str, str] | None = None,
+    storage_options: Callable[[str], dict[str, str] | None] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
-    """Trace a live LazyFrame using Polars' optimized, structured query plan."""
-    return InputSourceTracer(lazyframe).get_column_sources()
+    """Trace a live LazyFrame using Polars' optimized, structured query plan.
+
+    source_names maps a scanned path to its transform id, for paths that do not contain
+    the id, such as S3 build folders. storage_options returns the options to read the
+    schema of a scanned path, or None when it needs none.
+    """
+    return InputSourceTracer(
+        lazyframe, source_names, storage_options
+    ).get_column_sources()

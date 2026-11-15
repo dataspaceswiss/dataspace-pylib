@@ -7,10 +7,11 @@ from .pyrunner_lib import (
     PyrunnerError,
     Transform,
     TransformNotFoundError,
+    storage_options,
     transform,
 )
 
-__version__ = "0.6.2"
+__version__ = "0.7.0b0"
 __all__ = [
     "ConfigurationError",
     "DataLoadError",
@@ -20,5 +21,6 @@ __all__ = [
     "Transform",
     "TransformNotFoundError",
     "main",
+    "storage_options",
     "transform",
 ]
