@@ -2,7 +2,7 @@
 
 ## Transform structure
 
-Place business logic in Python transform files, conventionally below `src/`. Define one function named `transform`. DataSpace refuses to save a file that defines more than one.
+Place business logic in Python transform files, conventionally below `src/`. Define one function named `transform`, or one function decorated with `@transform` from `dataspace_pylib`. DataSpace refuses to save a file that defines more than one; the runner calls the function named `transform` first.
 
 Start the file with a docstring that says what the transform produces and from what, and keep it current with the logic.
 
@@ -124,7 +124,7 @@ Use `_connections.json` to resolve transform RIDs to source files and upstream t
 
 Whenever a mapped Python file moves or is renamed, update its `path` in `_connections.json` in the same change. A stale path breaks execution.
 
-DataSpace recognizes two input declaration forms.
+DataSpace recognizes three input declaration forms.
 
 Use a bare parameter for a transform of the same workspace; it is found by its name:
 
@@ -145,9 +145,20 @@ def transform(source_data: Transform("rid.transform.source")):
     return source_data
 ```
 
-An input from a linked foreign workspace is always declared by its RID; the resolved connection preserves cross-workspace lineage. A parameter of the type `Previous` is not an input (see Incremental builds).
+The equivalent decorator form, which also lets the function have another name:
 
-`Transform("WORKSPACE.transform")`, for example `orders: Transform("INSTACART.orders")`, is a planned DataSpace syntax and is not yet supported. Until it is implemented, use the foreign transform's RID in the annotation.
+```python
+from dataspace_pylib import Transform, transform
+
+
+@transform(source_data=Transform("rid.transform.source"))
+def build_output(source_data):
+    return source_data
+```
+
+An input from a linked foreign workspace is always declared by its RID, in the annotation or the decorator; the resolved connection preserves cross-workspace lineage. A parameter of the type `Previous` is not an input (see Incremental builds).
+
+`Transform("WORKSPACE.transform")`, for example `orders: Transform("INSTACART.orders")`, is a planned DataSpace syntax and is not yet supported. Until it is implemented, use the foreign transform's RID in the annotation or decorator binding.
 
 ### How DataSpace reads input declarations
 
@@ -156,6 +167,7 @@ DataSpace works out a transform's inputs by parsing the syntax of the source fil
 | Declaration | What DataSpace 1.13 reads |
 | --- | --- |
 | `name: Transform("rid.transform.x")`, also inside `Annotated[...]`, and `dataspace_pylib.Transform(...)` | Input bound to that RID. |
+| `@transform(name=Transform("rid.transform.x"))` | Input bound to that RID. |
 | `name: Transform(SOME_RID)` | Input bound to the value of `SOME_RID` when it is assigned exactly once in the same file, at module level, to a plain string. Otherwise the save is rejected. |
 | `name: Transform("rid." + suffix)`, an f-string, or any other computed value | The save is rejected. |
 | `name` | Input bound by name. |

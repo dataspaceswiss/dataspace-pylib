@@ -625,6 +625,29 @@ def load_module(module_name: str, file_path: str) -> Any:
         raise ModuleLoadError(f"Failed to load module from {file_path}: {e}") from e
 
 
+def transform(*args: Any, **inputs: Any) -> Any:
+    """Marks the transform function of a file, for one that is not named ``transform``, and can bind its
+    inputs:
+
+        @transform
+        def build_orders(source): ...
+
+        @transform(source=Transform("rid.transform.…"))
+        def build_orders(source): ...
+    """
+
+    def mark(func: Callable[..., Any]) -> Callable[..., Any]:
+        func._dataspace_transform = True  # type: ignore[attr-defined]
+        func._dataspace_inputs = inputs  # type: ignore[attr-defined]
+        return func
+
+    if len(args) == 1 and callable(args[0]) and not inputs:
+        return mark(args[0])
+    if args:
+        raise TypeError("@transform binds inputs by name: @transform(orders=Transform('rid.transform.…'))")
+    return mark
+
+
 def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform | None:
     """The Transform a parameter annotation names, as DataSpace reads it from the source."""
     if isinstance(annotation, str):
@@ -671,10 +694,11 @@ def _read_inputs(
     func: Callable[..., Any], connections: list[Connection]
 ) -> dict[str, pl.LazyFrame | pd.DataFrame | Previous]:
     """The arguments of a transform function: an input dataset for each parameter, named by the
-    parameter (the name of a transform of this workspace) or by a Transform("rid") annotation, and the
-    previous build for a parameter of the type Previous."""
+    @transform decorator, by a Transform("rid") annotation or by the parameter itself (the name of a
+    transform of this workspace), and the previous build for a parameter of the type Previous."""
     build = _build()
     by_name = {path_to_name(connection.path): connection.id for connection in connections}
+    decorated: dict[str, Any] = getattr(func, "_dataspace_inputs", {})
     arguments: dict[str, pl.LazyFrame | pd.DataFrame | Previous] = {}
 
     for name, parameter in inspect.signature(func).parameters.items():
@@ -684,8 +708,13 @@ def _read_inputs(
             arguments[name] = Previous()
             continue
 
-        annotated = _annotated_transform(parameter.annotation, func)
-        rid = annotated.rid if annotated is not None else by_name.get(name)
+        if name in decorated:
+            # @transform(name=Transform("rid")), or the name of a transform of this workspace
+            bound = decorated[name]
+            rid = bound.rid if isinstance(bound, Transform) else by_name.get(bound, bound)
+        else:
+            annotated = _annotated_transform(parameter.annotation, func)
+            rid = annotated.rid if annotated is not None else by_name.get(name)
         if rid is None:
             raise DataLoadError(f"Parameter '{name}' names no transform of this workspace.")
         dataset = build.inputs.get(rid)
@@ -745,9 +774,22 @@ def _run_transform() -> None:
 
     # Not under the transform's own name, which could be that of a module the code imports
     module = load_module(f"dataspace_transform_{path_to_name(connection.path)}", connection.path)
+    # The function named transform, or the one decorated with @transform. A file that imports the decorator
+    # has it under that name, which is not its transform.
     func = getattr(module, "transform", None)
-    if not callable(func):
-        raise ModuleLoadError(f"{connection.path} does not contain a function named 'transform'.")
+    if not callable(func) or func is transform:
+        func = next(
+            (
+                member
+                for _, member in inspect.getmembers(module)
+                if callable(member) and getattr(member, "_dataspace_transform", False)
+            ),
+            None,
+        )
+    if func is None:
+        raise ModuleLoadError(
+            f"{connection.path} does not contain a function named 'transform' or one decorated with @transform."
+        )
 
     # A lazy query only runs when its output is written, so reading, transforming
     # and writing are timed together; health checks run afterwards on the written

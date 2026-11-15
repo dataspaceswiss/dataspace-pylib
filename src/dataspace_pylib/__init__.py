@@ -14,6 +14,7 @@ from .runner import (
     Transform,
     TransformNotFoundError,
     build,
+    transform,
 )
 
 __version__ = "0.7.0.dev0"
@@ -32,4 +33,5 @@ __all__ = [
     "Transform",
     "TransformNotFoundError",
     "build",
+    "transform",
 ]

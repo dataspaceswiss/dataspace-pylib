@@ -203,6 +203,40 @@ def test_an_input_of_another_workspace_is_mocked_by_its_rid(workspace):
     assert workspace.data("uses_other")["total"].to_list() == [3]
 
 
+def test_the_decorator_marks_a_transform_of_another_name_and_binds_its_inputs(
+    workspace,
+):
+    rid = "rid.transform.11111111-2222-3333-4444-555555555555"
+    workspace.add("source", SOURCE)
+    workspace.add(
+        "plain",
+        "from dataspace_pylib import transform\n"
+        "@transform\n"
+        "def build_plain(source):\n"
+        "    return source.head(1)\n",
+        inputs=("source",),
+    )
+    workspace.add(
+        "bound",
+        "import polars as pl\n"
+        "from dataspace_pylib import Transform, transform\n"
+        f"@transform(local='source', other=Transform('{rid}'))\n"
+        "def build_bound(local, other):\n"
+        "    return pl.concat([local.select('id'), other.select('id')])\n",
+        inputs=("source", rid),
+    )
+    mock = workspace.root / ".dataspace" / rid / "mock" / "datasets"
+    mock.mkdir(parents=True)
+    pl.DataFrame({"id": [9]}).write_parquet(mock / "data.parquet")
+
+    run_local("source")
+    run_local("plain")
+    run_local("bound")
+
+    assert workspace.data("plain")["id"].to_list() == [1]
+    assert workspace.data("bound")["id"].to_list() == [1, 2, 3, 9]
+
+
 def test_artifacts_are_in_the_build_folder_and_downstream_reads_them_in_place(
     workspace,
 ):
@@ -301,7 +335,16 @@ def test_a_pandas_workspace_reads_and_writes_pandas(tmp_path, monkeypatch):
             DataLoadError,
             "names no transform",
         ),
-        ("def other():\n    pass\n", DataSpaceError, "function named 'transform'"),
+        (
+            "def other():\n    pass\n",
+            DataSpaceError,
+            "function named 'transform' or one decorated",
+        ),
+        (
+            "from dataspace_pylib import transform\ndef other():\n    pass\n",
+            DataSpaceError,
+            "function named 'transform' or one decorated",
+        ),
         (
             "def transform():\n    return 'text'\n",
             DataSpaceError,
