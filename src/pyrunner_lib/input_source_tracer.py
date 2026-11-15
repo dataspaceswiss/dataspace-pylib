@@ -214,8 +214,13 @@ class InputSourceTracer:
         left = self._analyze(node.inputs[0])
         right = self._analyze(node.inputs[1])
         key_count = len(node.expression_names) // 2
-        right_keys = set(node.expression_names[key_count:])
+        left_keys = node.expression_names[:key_count]
+        right_keys = node.expression_names[key_count:]
         sequence = self._items(left)
+        left_by_name = {item.name: item.lineage for item in sequence}
+        for left_name, right_name in zip(left_keys, right_keys):
+            if left_name in left_by_name and right_name in right.columns:
+                left_by_name[left_name].merge(right.columns[right_name])
         sequence.extend(
             item for item in self._items(right) if item.name not in right_keys
         )
@@ -298,14 +303,26 @@ class InputSourceTracer:
                 item for item in right_items if item.name not in right_keys
             ]
 
-        if how == "Full" and coalesce:
-            sequence_by_name = {item.name: item.lineage for item in sequence}
-            right_by_name = {item.name: item.lineage for item in right_items}
+        # A join key that ends up as one output column was matched on both sides,
+        # so it comes from both inputs whichever side's column Polars keeps.
+        if how not in {"Semi", "Anti"} and (how != "Full" or coalesce):
+            kept, other = (
+                (right_items, left_items)
+                if how == "Right"
+                else (left_items, right_items)
+            )
+            kept_by_name = {item.name: item.lineage for item in kept}
+            other_by_name = {item.name: item.lineage for item in other}
             for left_key, right_key in zip(node.left_on, node.right_on):
                 left_name = self._direct_column_name(left_key, node.input_left)
                 right_name = self._direct_column_name(right_key, node.input_right)
-                if left_name in sequence_by_name and right_name in right_by_name:
-                    sequence_by_name[left_name].merge(right_by_name[right_name])
+                kept_name, other_name = (
+                    (right_name, left_name)
+                    if how == "Right"
+                    else (left_name, right_name)
+                )
+                if kept_name in kept_by_name and other_name in other_by_name:
+                    kept_by_name[kept_name].merge(other_by_name[other_name])
 
         columns = self._by_position(output_names, sequence)
         if columns:

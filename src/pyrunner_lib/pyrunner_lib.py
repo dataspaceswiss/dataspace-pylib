@@ -68,31 +68,16 @@ class DSMeta:
         self.transform_id = rid
         self.artifact_dir = f"{base_path}/data/{rid}/artifacts"
 
-        # Add DS_META data if available
-        if ds_meta_data:
-            self.data_snapshot_id = ds_meta_data.get("Id")
-            self.build_id = ds_meta_data.get("BuildId")
-            self.row_count = ds_meta_data.get("RowCount")
-            self.column_count = ds_meta_data.get("ColumnCount")
-            self.file_size = ds_meta_data.get("FileSize")
-            self.schema = ds_meta_data.get("Schema")
-            self.creation_date = ds_meta_data.get("CreationDate")
-
-            # Add schema columns for easy access
-            if self.schema and "Columns" in self.schema:
-                self.columns = self.schema["Columns"]
-            else:
-                self.columns = []
-        else:
-            # Default values when DS_META is not available
-            self.data_snapshot_id = None
-            self.build_id = None
-            self.row_count = None
-            self.column_count = None
-            self.file_size = None
-            self.schema = None
-            self.creation_date = None
-            self.columns = []
+        # Every field is None when DS_META has nothing for this dataset
+        ds_meta_data = ds_meta_data or {}
+        self.data_snapshot_id = ds_meta_data.get("Id")
+        self.build_id = ds_meta_data.get("BuildId")
+        self.row_count = ds_meta_data.get("RowCount")
+        self.column_count = ds_meta_data.get("ColumnCount")
+        self.file_size = ds_meta_data.get("FileSize")
+        self.schema = ds_meta_data.get("Schema")
+        self.creation_date = ds_meta_data.get("CreationDate")
+        self.columns = self.schema["Columns"] if self.schema and "Columns" in self.schema else []
 
 
 # JSON Schema Models
@@ -131,7 +116,6 @@ CONFIG_FILE = "_config.json"
 CONNECTIONS_FILE = "_connections.json"
 
 # Global configuration - will be loaded when needed
-CONFIG: Config | None = None
 CONNECTIONS: list[Connection] | None = None
 DF_TYPE: str | None = None
 DEFAULT_DRAFT_READ_LIMIT = 1_000_000
@@ -160,7 +144,7 @@ def load_ds_meta() -> None:
 
 def load_configuration() -> None:
     """Load configuration files with error handling."""
-    global CONFIG, CONNECTIONS, DF_TYPE
+    global CONNECTIONS, DF_TYPE
     config = load_json(CONFIG_FILE, Config)
     connections = load_json(CONNECTIONS_FILE, Connection)
 
@@ -173,7 +157,6 @@ def load_configuration() -> None:
             f"Invalid configuration in {CONNECTIONS_FILE}: expected a list"
         )
 
-    CONFIG = config
     CONNECTIONS = connections
     DF_TYPE = config.dfType
 
@@ -401,8 +384,9 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
             param_mapping[name] = name
 
     # A lazy query only runs when its output is written, so reading, transforming
-    # and writing cannot be timed separately
-    start_time = time.time()
+    # and writing are timed together; health checks run afterwards on the written
+    # file and get their own timer
+    start_time = time.perf_counter()
 
     # Read input data
     data_dict = read_parquet_files(
@@ -422,14 +406,16 @@ def _execute_transform(transform_id: str, base_path: str = "") -> None:
     # Write output
     output_path = f"{base_path}/data/{transform_conn.id}/datasets/data.parquet"
     write_df_to_parquet(result, output_path, transform_conn.id, base_path)
+    print(f"Execution Time: {time.perf_counter() - start_time:.2f} sec")
 
     # Checks run on the written file: re-running the transform for every check is
     # slower, and its row order may differ from the file's
     if health_checks:
+        checks_start = time.perf_counter()
         run_health_checks(output_path, health_checks)
+        print(f"Health Check Time: {time.perf_counter() - checks_start:.2f} sec")
 
     print("--------- Build successful ---------")
-    print(f"Execution Time: {time.time() - start_time:.2f} sec")
 
 
 def _read_parquet_head(file_path: str, limit: int) -> pd.DataFrame:
@@ -447,7 +433,7 @@ def _read_parquet_head(file_path: str, limit: int) -> pd.DataFrame:
 
 def read_parquet_files(
     connections: dict[str, Connection],
-    params: list[str] | dict[str, str],
+    param_mapping: dict[str, str],
     base_path: str,
     transform_id: str | None = None,
     explicit_params: set[str] | None = None,
@@ -459,12 +445,6 @@ def read_parquet_files(
         )
 
     data_dict: dict[str, pl.LazyFrame | pd.DataFrame] = {}
-
-    # Convert list of params to identity mapping for backward compatibility
-    if isinstance(params, list):
-        param_mapping = {p: p for p in params}
-    else:
-        param_mapping = params
 
     # Create internal lookup for connections by ID (RID) and by legacy name (path stem)
     conn_by_id = {conn.id: conn for conn in connections.values()}
