@@ -740,7 +740,7 @@ def run_build(description: BuildDescription) -> None:
     _description = description
     try:
         try:
-            _run_transform()
+            timings = _run_transform()
         except BaseException:
             # Keep the artifacts and health report of failed builds for debugging.
             try:
@@ -755,14 +755,20 @@ def run_build(description: BuildDescription) -> None:
         except Exception as e:
             raise DataWriteError(f"Failed to upload artifacts: {e}") from e
         if _credentials(description.output.uri) is not None:
-            print(f"Upload Time: {time.perf_counter() - upload_start:.2f} sec")
+            # The artifacts and the small files beside them (health report, column lineage); the dataset itself
+            # is written to its place while the transform runs
+            timings.append(("Artifact Upload Time", time.perf_counter() - upload_start))
     finally:
         _description = None
 
+    # The receipt first, the statistics after it
     print("--------- Build successful ---------")
+    for label, seconds in timings:
+        print(f"{label}: {seconds:.2f} sec")
 
 
-def _run_transform() -> None:
+def _run_transform() -> list[tuple[str, float]]:
+    """Runs the transform and its health checks; returns how long each took, for the receipt."""
     global _df_type
     build = _build()
     config, connections = load_configuration()
@@ -813,7 +819,7 @@ def _run_transform() -> None:
         write_append(result.frame, output_folder)
     else:
         write_dataset(result, output_folder)
-    print(f"Execution Time: {time.perf_counter() - start_time:.2f} sec")
+    timings = [("Execution Time", time.perf_counter() - start_time)]
 
     # Checks run on the written dataset: re-running the transform for every check is
     # slower, and its row order may differ from the dataset's
@@ -825,4 +831,5 @@ def _run_transform() -> None:
             build.metaFolder,
             storage_options(output_folder),
         )
-        print(f"Health Check Time: {time.perf_counter() - checks_start:.2f} sec")
+        timings.append(("Health Check Time", time.perf_counter() - checks_start))
+    return timings

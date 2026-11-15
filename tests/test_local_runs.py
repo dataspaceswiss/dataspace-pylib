@@ -325,6 +325,23 @@ def test_health_checks_write_their_report_and_a_failed_one_fails_the_build(works
     assert not (workspace.folder("checked") / "SUCCESS").exists()
 
 
+def test_the_receipt_comes_first_and_the_statistics_after_it(workspace, capsys):
+    workspace.add(
+        "checked",
+        "import polars as pl\n"
+        "from dataspace_pylib import Check\n"
+        "def transform():\n"
+        "    return pl.LazyFrame({'id': [1, 2]}), [Check('id').unique()]\n",
+    )
+
+    run_local("checked")
+
+    lines = [line.split(":")[0] for line in capsys.readouterr().out.splitlines()]
+    receipt = lines.index("--------- Build successful ---------")
+    # Nothing is uploaded on a local run, so that line is missing
+    assert lines[receipt + 1 :] == ["Execution Time", "Health Check Time"]
+
+
 def test_a_large_output_is_split_into_files(workspace, monkeypatch):
     monkeypatch.setattr("dataspace_pylib.runner.DATASET_PART_BYTES", 1_000_000)
     # Each row is 8 bytes in memory, so the 8 MB of this frame fill eight files
