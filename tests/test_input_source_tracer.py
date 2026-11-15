@@ -897,14 +897,17 @@ def test_join_duplicate_names_are_kept_separate(sources):
     result = _trace(sources["left"].join(sources["right"], on="id", suffix="_lookup"))
     assert result["name"] == [_source(sources["left_rid"], "name")]
     assert result["name_lookup"] == [_source(sources["right_rid"], "name")]
-    assert result["id"] == [_source(sources["left_rid"], "id")]
 
 
-def test_right_join_uses_right_join_key(sources):
+@pytest.mark.parametrize("how", ["inner", "left", "right"])
+def test_join_key_has_both_sources(sources, how):
     result = _trace(
-        sources["left"].join(sources["right"], on="id", how="right", suffix="_lookup")
+        sources["left"].join(sources["right"], on="id", how=how, suffix="_lookup")
     )
-    assert result["id"] == [_source(sources["right_rid"], "id")]
+    assert _entries(result["id"]) == {
+        _source(sources["left_rid"], "id"),
+        _source(sources["right_rid"], "id"),
+    }
     assert result["name"] == [_source(sources["left_rid"], "name")]
 
 
@@ -1210,14 +1213,17 @@ def test_plan_analysis_is_memoized_with_isolated_results(monkeypatch):
     assert second.columns["value"].sources == {("source.parquet", "value")}
 
 
-def test_asof_join_tracks_each_side_without_name_guessing(sources):
+def test_asof_join_key_has_both_sources(sources):
     result = _trace(
         sources["left"]
         .sort("id")
         .join_asof(sources["right"].sort("id"), on="id")
     )
 
-    assert result["id"] == [_source(sources["left_rid"], "id")]
+    assert _entries(result["id"]) == {
+        _source(sources["left_rid"], "id"),
+        _source(sources["right_rid"], "id"),
+    }
     assert result["name"] == [_source(sources["left_rid"], "name")]
     assert result["name_right"] == [_source(sources["right_rid"], "name")]
     assert result["score"] == [_source(sources["right_rid"], "score")]
