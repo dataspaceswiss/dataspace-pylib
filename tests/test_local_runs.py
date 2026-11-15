@@ -274,13 +274,15 @@ def test_a_pandas_workspace_reads_and_writes_pandas(tmp_path, monkeypatch):
     workspace = Workspace(tmp_path, "pandas")
     workspace.add(
         "source",
-        "import pandas as pd\ndef transform():\n    return pd.DataFrame({'id': [1, 2]})\n",
+        "import pandas as pd\ndef transform():\n    return pd.DataFrame({'id': [1, 2], 'meta': ['a', 'b']})\n",
     )
     workspace.add(
         "plus",
         "import pandas as pd\n"
         "def transform(source):\n"
         "    assert isinstance(source, pd.DataFrame) and source.meta.row_count == 2\n"
+        # A column with the name of an attribute stays a column
+        "    assert list(source['meta']) == ['a', 'b'] and source.artifacts.list() == []\n"
         "    return source.assign(plus=source['id'] + 1)\n",
         inputs=("source",),
     )
@@ -312,6 +314,25 @@ def test_mistakes_in_a_transform_are_named(workspace, code, error, message):
 
     with pytest.raises(error, match=message):
         run_local("wrong")
+
+
+def test_a_transform_can_define_dataclasses_and_be_named_like_a_module(workspace):
+    workspace.add(
+        "json",
+        "from __future__ import annotations\n"
+        "import json\n"
+        "from dataclasses import dataclass\n"
+        "import polars as pl\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    id: int\n"
+        "def transform():\n"
+        "    return pl.LazyFrame({'id': [Row(json.loads('1')).id]})\n",
+    )
+
+    run_local("json")
+
+    assert workspace.data("json")["id"].to_list() == [1]
 
 
 def test_a_transform_that_does_not_exist_lists_the_ones_that_do(workspace):

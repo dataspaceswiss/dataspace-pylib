@@ -613,7 +613,13 @@ def load_module(module_name: str, file_path: str) -> Any:
         if spec is None or spec.loader is None:
             raise ModuleLoadError(f"Could not create module spec for {file_path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Registered while it runs, as an imported module is: dataclasses and pickling look their module up
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[module_name]
+            raise
         return module
     except Exception as e:
         raise ModuleLoadError(f"Failed to load module from {file_path}: {e}") from e
@@ -691,9 +697,10 @@ def _read_inputs(
             frame = _read_dataset(f"{dataset.uri}/{DATASET_FOLDER_NAME}")
         except Exception as e:
             raise DataLoadError(f"Failed to load '{name}' from {dataset.uri}: {e}") from e
-        # An input is its dataset with the facts about it and its artifacts
-        frame.meta = Meta(dataset.meta)  # type: ignore[union-attr]
-        frame.artifacts = Artifacts(f"{dataset.uri}/artifacts")  # type: ignore[union-attr]
+        # An input is its dataset with the facts about it and its artifacts. Set past the frame's own
+        # __setattr__: pandas would overwrite a column of that name instead.
+        object.__setattr__(frame, "meta", Meta(dataset.meta))
+        object.__setattr__(frame, "artifacts", Artifacts(f"{dataset.uri}/artifacts"))
         arguments[name] = frame
     return arguments
 
@@ -736,7 +743,8 @@ def _run_transform() -> None:
     if connection is None:
         raise TransformNotFoundError(f"Transform with ID '{build.transformId}' not found.")
 
-    module = load_module(path_to_name(connection.path), connection.path)
+    # Not under the transform's own name, which could be that of a module the code imports
+    module = load_module(f"dataspace_transform_{path_to_name(connection.path)}", connection.path)
     func = getattr(module, "transform", None)
     if not callable(func):
         raise ModuleLoadError(f"{connection.path} does not contain a function named 'transform'.")

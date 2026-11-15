@@ -45,7 +45,15 @@ def _dataset_files(build_folder: Path) -> list[Path]:
 
 def _builds(transform_folder: Path) -> list[Path]:
     """The build folders of a transform, oldest first."""
-    return sorted(p for p in (transform_folder / "builds").glob("[0-9]*") if p.is_dir())
+    builds = transform_folder / "builds"
+    if not builds.is_dir():
+        return []
+    folders = (
+        folder
+        for folder in builds.iterdir()
+        if folder.is_dir() and folder.name.isdigit()
+    )
+    return sorted(folders, key=lambda folder: int(folder.name))
 
 
 def _dataset(rid: str, build_folder: Path) -> Dataset:
@@ -152,7 +160,7 @@ def run_local(transform: str) -> None:
     (build_folder / SUCCESS).touch()
 
     # Keep the last successful builds and what came after the oldest of them
-    oldest_kept = _succeeded(store / name)[-BUILDS_KEPT:][0]
+    oldest_kept = int(_succeeded(store / name)[-BUILDS_KEPT:][0].name)
     for old in _builds(store / name):
-        if old.name < oldest_kept.name:
+        if int(old.name) < oldest_kept:
             shutil.rmtree(old)

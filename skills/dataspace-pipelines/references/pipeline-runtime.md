@@ -165,13 +165,7 @@ Write the RID as a plain string literal directly inside the call, import `Transf
 
 Nothing re-derives the inputs when changes arrive over git. Whenever you add, remove, or rebind an input in code, make the same change to that transform's `inputs` in `_connections.json`, using the same RIDs.
 
-The conventional entry point is:
-
-```python
-import dataspace_pylib
-
-dataspace_pylib.main()
-```
+A workspace holds no entry point of its own: DataSpace runs a transform with `python -m dataspace_pylib build <description file>`, and a developer with `python -m dataspace_pylib run <transform>` (see Local execution).
 
 ## The running build
 
@@ -297,7 +291,7 @@ python -m dataspace_pylib run <transform>
 
 `<transform>` is the transform's name (its file name without `.py`), its file, or its RID. The Python environment needs `dataspace-pylib` and the workspace's other packages from `_config.json`.
 
-A local build works like one on DataSpace, only the place differs: the folders are below `.dataspace/` in the repository (ignored by git) instead of in S3.
+A local build works like one on DataSpace, only the place differs: the folders are below `.dataspace/` in the repository instead of in S3. New workspaces ignore `.dataspace` in git; add it to the `.gitignore` of an older one before the first local run. The local store belongs to the clone, whatever branch is checked out.
 
 - **Every run is a build of its own**, `.dataspace/<transform>/builds/0001/`, `0002/`, …, with `datasets/`, `artifacts/` and `meta/` (`columns.json`, `health_report.json`). A build that succeeded holds the file `SUCCESS`. The last three successful builds are kept.
 - **An input is the latest successful local build of the upstream transform.** Build the upstream transforms first, in their order.
