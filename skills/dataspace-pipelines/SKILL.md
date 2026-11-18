@@ -9,7 +9,7 @@ Develop DataSpace transforms while preserving pipeline wiring, lineage, persiste
 
 ## Compatibility
 
-This skill describes `dataspace-pylib` 0.7.0 running on DataSpace 2.0.0. A project declares its version as the `dataspace-pylib` entry in the `dependencies` of `pyproject.toml`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
+This skill describes `dataspace-pylib` 0.7.0 as it is being developed (`0.7.0.dev1`, branch `feature/s3-storage`) running on DataSpace 2.0.0 as it is being developed. A project declares its version as the `dataspace-pylib` entry in the `dependencies` of `pyproject.toml`. When that version differs, inspect its public API and the current DataSpace documentation before relying on signatures or runtime behavior described here. Update this baseline in the same change as every library version bump.
 
 ## Workflow
 

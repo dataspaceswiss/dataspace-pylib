@@ -296,7 +296,7 @@ toml = [
 
 [[package]]
 name = "dataspace-pylib"
-version = "0.7.0"
+version = "0.7.0.dev1"
 source = { editable = "." }
 dependencies = [
     { name = "pandas" },
