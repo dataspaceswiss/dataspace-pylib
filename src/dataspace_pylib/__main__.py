@@ -7,6 +7,7 @@ run <transform>   a build on this machine, in a clone of a workspace (see local.
 import argparse
 import json
 import sys
+import traceback
 
 from pydantic import ValidationError
 
@@ -55,6 +56,9 @@ def main() -> None:
         run_build(description)
     # The message says what is wrong; a traceback into this library would add nothing
     except (DataSpaceError, HealthCheckFailure) as e:
+        # An error of the transform's own code, such as one while its file is imported, keeps its file and line
+        if e.__cause__ is not None:
+            traceback.print_exception(e.__cause__, file=sys.stderr)
         print(f"{type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
 

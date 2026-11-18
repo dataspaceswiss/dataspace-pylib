@@ -17,7 +17,7 @@ from .runner import (
     transform,
 )
 
-__version__ = "0.7.0.dev0"
+__version__ = "0.7.0"
 __all__ = [
     "Artifacts",
     "Check",

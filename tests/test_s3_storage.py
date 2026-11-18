@@ -54,7 +54,9 @@ REGION = "us-east-1"
 
 @pytest.fixture
 def s3():
-    boto3 = pytest.importorskip("boto3")
+    # A dev dependency: with an endpoint set, a missing boto3 fails the run instead of skipping the tests
+    import boto3
+
     root = {
         "endpoint_url": ENDPOINT,
         "aws_access_key_id": os.environ["DS_TEST_S3_ACCESS_KEY"],

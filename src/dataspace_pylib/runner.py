@@ -209,12 +209,16 @@ def _filesystem(path: str) -> tuple[pafs.FileSystem, str]:
 
 
 def _dataset_files(dataset_folder: str) -> list[str]:
-    """The Parquet files of a dataset folder, relative to it."""
+    """The Parquet files of a dataset folder, relative to it, in the order their rows were added: the appended
+    folders come after the files of the first build, whatever those are named."""
     fs, folder = _filesystem(dataset_folder)
     return sorted(
-        info.path.removeprefix(folder + "/")
-        for info in fs.get_file_info(pafs.FileSelector(folder, recursive=True, allow_not_found=True))
-        if info.type == pafs.FileType.File and info.path.endswith(".parquet")
+        (
+            info.path.removeprefix(folder + "/")
+            for info in fs.get_file_info(pafs.FileSelector(folder, recursive=True, allow_not_found=True))
+            if info.type == pafs.FileType.File and info.path.endswith(".parquet")
+        ),
+        key=lambda file: (file.startswith(APPEND_FOLDER_PREFIX), file),
     )
 
 
@@ -648,6 +652,25 @@ def transform(*args: Any, **inputs: Any) -> Any:
     return mark
 
 
+def _parse_annotation(text: str) -> ast.expr:
+    """The expression of an annotation kept as source text. A quoted annotation under
+    from __future__ import annotations is kept with its quotes, so they are unwrapped too."""
+    node = ast.parse(text, mode="eval").body
+    while isinstance(node, ast.Constant) and isinstance(node.value, str):
+        node = ast.parse(node.value, mode="eval").body
+    return node
+
+
+def _signature(func: Callable[..., Any]) -> inspect.Signature:
+    """The parameters of a transform. Python 3.14 evaluates annotations only when asked, and a name imported
+    only for type checking would then fail; it stays a forward reference instead."""
+    if sys.version_info >= (3, 14):
+        import annotationlib  # type: ignore[import-not-found]
+
+        return inspect.signature(func, annotation_format=annotationlib.Format.FORWARDREF)
+    return inspect.signature(func)
+
+
 def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform | None:
     """The Transform a parameter annotation names, as DataSpace reads it from the source."""
     if isinstance(annotation, str):
@@ -657,7 +680,7 @@ def _annotated_transform(annotation: Any, func: Callable[..., Any]) -> Transform
         call = next(
             (
                 node
-                for node in ast.walk(ast.parse(annotation, mode="eval"))
+                for node in ast.walk(_parse_annotation(annotation))
                 if isinstance(node, ast.Call)
                 and (
                     (isinstance(node.func, ast.Name) and node.func.id == "Transform")
@@ -694,7 +717,7 @@ def _is_previous(annotation: Any) -> bool:
     """Whether a parameter annotation asks for the previous build: Previous, or Previous in a union."""
     if isinstance(annotation, str):
         # from __future__ import annotations keeps the annotation as its source text
-        return _names_previous(ast.parse(annotation, mode="eval"))
+        return _names_previous(_parse_annotation(annotation))
     return annotation is Previous or Previous in typing.get_args(annotation)
 
 
@@ -709,7 +732,7 @@ def _read_inputs(
     decorated: dict[str, Any] = getattr(func, "_dataspace_inputs", {})
     arguments: dict[str, pl.LazyFrame | pd.DataFrame | Previous] = {}
 
-    for name, parameter in inspect.signature(func).parameters.items():
+    for name, parameter in _signature(func).parameters.items():
         if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
         if _is_previous(parameter.annotation):
@@ -791,10 +814,10 @@ def _run_transform() -> list[tuple[str, float]]:
 
     # Not under the transform's own name, which could be that of a module the code imports
     module = load_module(f"dataspace_transform_{path_to_name(connection.path)}", connection.path)
-    # The function named transform, or the one decorated with @transform. A file that imports the decorator
-    # has it under that name, which is not its transform.
+    # The function named transform, or the one decorated with @transform. Only the file's own function: one it
+    # imported under that name, the decorator among them, is not its transform.
     func = getattr(module, "transform", None)
-    if not callable(func) or func is transform:
+    if not (callable(func) and getattr(func, "__module__", None) == module.__name__):
         func = next(
             (
                 member

@@ -23,6 +23,7 @@ import pyarrow.dataset as pads  # type: ignore[import-untyped]
 from .runner import (
     DATASET_FOLDER_NAME,
     BuildDescription,
+    ConfigurationError,
     DataLoadError,
     Dataset,
     Location,
@@ -103,6 +104,14 @@ def run_local(transform: str) -> None:
     """Builds a transform, given by its name, its file or its RID, in the repository of the current folder."""
     _, connections = load_configuration()
     names = {connection.id: path_to_name(connection.path) for connection in connections}
+    # Builds are kept in a folder named after the transform, so two of one name would share builds and mock data,
+    # and an input of that name could be either. DataSpace keeps names unique; a clone edited by hand may not.
+    shared = sorted({name for name in names.values() if list(names.values()).count(name) > 1})
+    if shared:
+        raise ConfigurationError(
+            f"Several transforms of this workspace are named {', '.join(map(repr, shared))}; "
+            "rename all but one of each"
+        )
     connection = next(
         (c for c in connections if transform in (c.id, c.path, path_to_name(c.path))),
         None,
@@ -134,11 +143,12 @@ def run_local(transform: str) -> None:
     builds = _builds(store / name)
     number = int(builds[-1].name) + 1 if builds else 1
     build_folder = store / name / "builds" / f"{number:04d}"
+    # Mock data is not a build, so it is never the previous build. Loaded before the build folder is made, so a
+    # previous build that cannot be read leaves no empty folder behind.
+    succeeded = _succeeded(store / name)
+    previous = _dataset(connection.id, succeeded[-1]) if succeeded else None
     for folder in ("artifacts", "meta"):
         (build_folder / folder).mkdir(parents=True)
-    # Mock data is not a build, so it is never the previous build
-    succeeded = _succeeded(store / name)
-    previous = succeeded[-1] if succeeded else None
 
     print(f"Building {name} into {os.path.relpath(build_folder)}")
     run_build(
@@ -151,7 +161,7 @@ def run_local(transform: str) -> None:
             local=True,
             output=Location(uri=str(build_folder)),
             inputs=inputs,
-            previous=_dataset(connection.id, previous) if previous else None,
+            previous=previous,
             artifactFolder=str(build_folder / "artifacts"),
             metaFolder=str(build_folder / "meta"),
         )

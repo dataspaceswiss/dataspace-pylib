@@ -185,6 +185,38 @@ def test_an_input_that_was_never_built_needs_mock_data(workspace):
     assert workspace.data("copy")["id"].to_list() == [1, 2, 3]
 
 
+# A quoted annotation keeps its quotes under future annotations; a frame type imported only for type checking
+# must not have to resolve, also not on Python 3.14, which evaluates annotations only when asked
+@pytest.mark.parametrize(
+    "future",
+    [
+        "from __future__ import annotations\n",
+        pytest.param(
+            "",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 14), reason="earlier Pythons evaluate annotations when the function is defined"
+            ),
+        ),
+    ],
+)
+def test_the_previous_build_is_found_however_the_annotations_are_written(workspace, future):
+    workspace.add(
+        "history",
+        future + "from typing import TYPE_CHECKING\n"
+        "import polars\n"
+        "from dataspace_pylib import Previous\n"
+        "if TYPE_CHECKING:\n"
+        "    import polars as pl\n"
+        "def transform(earlier: 'Previous') -> pl.LazyFrame:\n"
+        "    return polars.LazyFrame({'first': [not earlier.exists]})\n",
+    )
+
+    run_local("history")
+    run_local("history")
+
+    assert workspace.data("history")["first"].to_list() == [False]
+
+
 # The second names the transform by a constant called Previous, which is not the type of that name
 @pytest.mark.parametrize("constant, argument", [("RID", "'{rid}'"), ("Previous", "Previous")])
 def test_an_input_of_another_workspace_is_mocked_by_its_rid(workspace, constant, argument):
@@ -458,6 +490,17 @@ def test_a_transform_that_does_not_exist_lists_the_ones_that_do(workspace):
         run_local("sauce")
 
 
+def test_two_transforms_of_one_name_would_share_their_builds(workspace):
+    workspace.add("source", SOURCE)
+    (workspace.root / "south").mkdir()
+    (workspace.root / "south" / "source.py").write_text(SOURCE)
+    workspace.connections.append({"id": "rid.transform.south", "path": "south/source.py", "inputs": []})
+    workspace._save()
+
+    with pytest.raises(ConfigurationError, match="Several transforms of this workspace are named 'source'"):
+        run_local("rid.transform.south")
+
+
 def test_the_api_needs_a_running_build():
     with pytest.raises(DataSpaceError, match="No build is running"):
         _ = build.artifacts
@@ -512,3 +555,36 @@ def test_command_line(workspace):
         "version: Input should be 1" in newer.stderr
         and "SECRET-VALUE" not in newer.stderr
     )
+
+
+def test_a_function_imported_under_the_name_transform_is_not_the_transform(workspace):
+    (workspace.root / "helper.py").write_text(
+        "import polars as pl\ndef transform():\n    return pl.LazyFrame({'x': [0]})\n"
+    )
+    workspace.add(
+        "uses_helper",
+        "import polars as pl\n"
+        "from dataspace_pylib import transform as mark\n"
+        "from helper import transform\n"
+        "@mark\n"
+        "def build_output():\n"
+        "    return pl.LazyFrame({'x': [1]})\n",
+    )
+
+    run_local("uses_helper")
+
+    assert workspace.data("uses_helper")["x"].to_list() == [1]
+
+
+def test_appended_rows_come_after_the_rows_of_the_first_build_whatever_its_files_are_named(tmp_path):
+    from dataspace_pylib.runner import _dataset_files
+
+    for file in ("data.parquet", "append-000002/00000000.parquet", "append-000001/00000000.parquet"):
+        (tmp_path / file).parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"x": [1]}).write_parquet(tmp_path / file)
+
+    assert _dataset_files(str(tmp_path)) == [
+        "data.parquet",
+        "append-000001/00000000.parquet",
+        "append-000002/00000000.parquet",
+    ]
