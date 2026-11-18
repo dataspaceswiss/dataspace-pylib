@@ -101,7 +101,7 @@ version = "0"
 requires-python = "==3.11.*"
 dependencies = [
     "plotly",
-    "dataspace-pylib @ git+https://github.com/dataspaceswiss/dataspace-pylib@<commit of feature/s3-storage>",
+    "dataspace-pylib @ git+https://github.com/dataspaceswiss/dataspace-pylib@v0.7.0",
 ]
 
 [tool.dataspace]
