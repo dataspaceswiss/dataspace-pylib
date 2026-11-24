@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataspace-pylib"
-version = "0.7.0.dev1"
+version = "0.7.0.dev2"
 authors = [
   { name="DataSpace", email="info@dataspace.ch" },
 ]
@@ -12,8 +12,8 @@ description = "Dataframe transform runner for DataSpace"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Column lineage reads Polars' internal query plan, which Polars 2 changed (see _SUPPORTED_IR_MAJORS)
-    "polars>=1.41.2,<2",
+    # Column lineage reads Polars' internal query plan, whose version changes with Polars (see _SUPPORTED_IR_MAJORS)
+    "polars>=2.2.0,<3",
     "pandas>=1.5.0",
     "pyarrow>=23.0.1",
     "pydantic>=2.0.0",

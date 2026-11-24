@@ -89,7 +89,7 @@ def _format_column_sources(
 class InputSourceTracer:
     """Trace a LazyFrame through Polars' structured optimized IR."""
 
-    _SUPPORTED_IR_MAJORS: ClassVar[range] = range(10, 15)
+    _SUPPORTED_IR_MAJORS: ClassVar[range] = range(16, 17)
     _PASSTHROUGH_NODES: ClassVar[frozenset[str]] = frozenset(
         {"Cache", "Distinct", "Filter", "Slice", "Sort"}
     )
@@ -122,10 +122,6 @@ class InputSourceTracer:
 
         self._source_names = source_names or {}
         self._storage_options = storage_options
-
-        # Polars 1.41 to 1.43 never return from visit() when the plan scans a CSV or NDJSON file in S3
-        # whose schema is not resolved yet; resolving it first avoids that.
-        lazyframe.collect_schema()
 
         # NodeTraverser is Polars' versioned plugin interface for optimized IR.
         # It is not public, so reject unknown major versions instead of guessing.

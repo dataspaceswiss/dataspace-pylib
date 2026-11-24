@@ -491,7 +491,7 @@ def test_input_that_was_not_granted_is_not_readable(build, monkeypatch):
 
 
 def test_build_reads_a_csv_from_the_artifacts_of_its_input(build):
-    """Polars 1.41 to 1.43 hang in the lineage trace of a CSV scanned from S3, unless its schema is resolved first."""
+    """A CSV scanned from S3 is read, and its lineage traced, without resolving its schema first."""
     client, code, input_build, output_build = build
     client.put_object(
         Bucket=BUCKET,
