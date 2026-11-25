@@ -206,6 +206,14 @@ Workspace secrets are environment variables named by the secret's key in the wor
 
 A build of code that is not committed yet is a draft. Each input is cut to its first `draft-read-limit` rows (1,000,000 unless `pyproject.toml` sets another number; `-1` reads every row). Its output is read only by other draft builds, never by a committed build, and it is never the previous build of a later run. Use a draft to try a change, and a committed build for results that count.
 
+## Branches
+
+Each branch keeps its own builds. A build reads each input from that input's newest readable build on the same branch, and, when the input has none there, from its newest readable build on `main`. A readable build is a successful one; a committed build reads only committed builds, while a draft build also reads drafts. The choice is made per input: an input already built on the branch is read from the branch, every other input from `main`. So a new or changed transform can be built on a branch right away against the data already built on `main`, without rebuilding its upstream on the branch first. Once a transform has a readable build on the branch, its downstream on the branch reads that build, also after newer data arrives on `main`. A change on the branch therefore reaches a transform only through builds on the branch: after changing an upstream transform, build it and every transform between it and the one under test on the branch. A build fails with missing inputs only when an input has no readable build on either branch.
+
+An input from a linked workspace follows the same rule in that workspace, so it is normally read from that workspace's `main`.
+
+A `Previous` parameter has no fallback: it is the transform's own last build on the same branch only. The first build of an incremental transform on a new branch therefore starts without history (`exists` is false), even when the transform has history on `main`, and later committed builds on the branch extend the branch's own history.
+
 ## Input metadata and upstream artifacts
 
 An input is the LazyFrame of the upstream dataset with two attributes. Annotate it as `Input` to get code completion for them.
@@ -266,7 +274,7 @@ Return health checks alongside the dataframe as `(dataframe, checks)`. Read [hea
 
 ## Incremental builds
 
-A parameter of the type `Previous` is the transform's own last successful, committed build on the same branch. The parameter can have any name, and it makes the transform incremental. `exists` is false on the first build; `data`, `artifacts` and `meta` are those of the previous build, shaped like an input's.
+A parameter of the type `Previous` is the transform's own last successful, committed build on the same branch, with no fallback to `main` (see [Branches](#branches)). The parameter can have any name, and it makes the transform incremental. `exists` is false on the first build; `data`, `artifacts` and `meta` are those of the previous build, shaped like an input's.
 
 Add rows without touching the old ones:
 
